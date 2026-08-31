@@ -47,11 +47,12 @@ contract FlashLoanSlippageSimulationTest {
     receive() external payable {}
 
     function setUp() public {
-        // 1. High Liquidity Pair (~200 ETH & 20,000,000 Tokens)
+        // Deploy MockUniswapV2Pair contracts to BASE Mainnet
         highLiqPair = new MockUniswapV2Pair{value: 200 ether}(20_000_000 ether, 200 ether);
-
-        // 2. Low Liquidity Pair (1.30 ETH & 130,000 Tokens)
         lowLiqPair = new MockUniswapV2Pair{value: 1.30 ether}(130_000 ether, 1.30 ether);
+
+        // Set up the environment to connect to BASE Mainnet
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"));
     }
 
     // SCENARIO 1: High Liquidity Pool (200 ETH) -> 0.6% DEX Fee Friction Prevents Extraction
