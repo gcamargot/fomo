@@ -5,6 +5,10 @@ set -e
 export SCANNER_INTERVAL="${SCANNER_INTERVAL:-60}"
 export SCANNER_CHAINS="${SCANNER_CHAINS:-base,arbitrum,ethereum,solana}"
 export DORMANT_INTERVAL="${DORMANT_INTERVAL:-120}"
+export FACTORY_INTERVAL="${FACTORY_INTERVAL:-15}"
+export LOG_WATCH_INTERVAL="${LOG_WATCH_INTERVAL:-8}"
+export FOMO_FACTORY_LISTENER="${FOMO_FACTORY_LISTENER:-1}"
+export FOMO_LOG_WATCHER="${FOMO_LOG_WATCHER:-1}"
 
 # Ensure contracts directory structure exists
 mkdir -p /app/contracts/triage_queue /var/log/supervisor

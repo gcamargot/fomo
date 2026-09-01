@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Tuple
 
 from token_scanner_daemon import (
     DB_PATH,
@@ -24,6 +26,56 @@ from token_scanner_daemon import (
     TriageReportGenerator,
     load_saved_source,
 )
+
+DISK_CHAINS = ("ethereum", "arbitrum", "base")
+
+
+def discover_disk_contracts(contracts_root: str = "./contracts") -> List[Tuple[str, str, str, str, str]]:
+    """Walk contracts/<chain>/<address>/src into (address, chain, name, compiler, category)."""
+    rows: List[Tuple[str, str, str, str, str]] = []
+    for chain in DISK_CHAINS:
+        root = os.path.join(contracts_root, chain)
+        if not os.path.isdir(root):
+            continue
+        for name in os.listdir(root):
+            addr = name.lower()
+            if not addr.startswith("0x") or len(addr) < 42:
+                continue
+            src_dir = os.path.join(root, name, "src")
+            if not os.path.isdir(src_dir):
+                continue
+            meta: Dict[str, Any] = {}
+            meta_path = os.path.join(root, name, "metadata.json")
+            if os.path.isfile(meta_path):
+                try:
+                    with open(meta_path, encoding="utf-8") as fh:
+                        meta = json.load(fh)
+                except (OSError, json.JSONDecodeError):
+                    meta = {}
+            rows.append((
+                addr,
+                chain,
+                str(meta.get("contract_name") or "Unknown"),
+                str(meta.get("compiler_version") or "Unknown"),
+                str(meta.get("category") or "CUSTOM_LOGIC"),
+            ))
+    return rows
+
+
+def ingest_disk_contracts(db: TokenScannerDB, contracts_root: str = "./contracts") -> int:
+    """INSERT OR IGNORE on-disk verified folders so reverify has rows to work on."""
+    rows = discover_disk_contracts(contracts_root)
+    ts = datetime.now(timezone.utc).isoformat()
+    for addr, chain, name, compiler, category in rows:
+        db.ensure_token_row(
+            address=addr,
+            chain=chain,
+            name=name,
+            compiler=compiler,
+            category=category,
+            timestamp=ts,
+        )
+    return len(rows)
 
 
 def _default_workers() -> int:
@@ -67,10 +119,13 @@ def reverify_one(
         triage_path = None
 
         if user_exploits:
-            is_active, dynamic_status, eth_bal, confirmed = (
+            is_active, dynamic_status, eth_bal, confirmed, profit_payload = (
                 OnChainStateVerifier.verify_onchain_liveness(
                     addr, chain, user_exploits, all_source
                 )
+            )
+            result["expected_profit_eth"] = (
+                profit_payload.get("expected_profit_eth") if profit_payload else None
             )
             if is_active and confirmed:
                 contract_meta = {
@@ -81,6 +136,7 @@ def reverify_one(
                     "category": category,
                     "eth_balance": eth_bal,
                     "dynamic_status": dynamic_status,
+                    "profit": profit_payload,
                 }
                 triage_path = TriageReportGenerator.generate_triage_file(
                     contract_meta, confirmed
@@ -133,6 +189,7 @@ def _persist_result(db: TokenScannerDB, result: Dict[str, Any]) -> None:
         "has_multicall_msgvalue": bool(findings.get("has_multicall_msgvalue", False)),
         "has_public_swapback": bool(findings.get("has_public_swapback", False)),
         "triage_file_path": triage_path,
+        "expected_profit_eth": result.get("expected_profit_eth"),
     }
     # Skips with no source still clear stale exploitable flags.
     db.update_token_flags(result["address"], fields)
@@ -159,12 +216,25 @@ def main() -> None:
         action="store_true",
         help="Do not wipe existing triage_queue cards before starting",
     )
+    parser.add_argument(
+        "--from-disk",
+        action="store_true",
+        help="Ingest contracts/{ethereum,arbitrum,base}/<addr> folders into SQLite first",
+    )
+    parser.add_argument(
+        "--contracts-root",
+        default="./contracts",
+        help="Root folder that contains per-chain contract directories",
+    )
     args = parser.parse_args()
     workers = max(1, args.workers)
 
     print("[*] Starting Complete Dataset Cleanup & Re-verification...")
     db = TokenScannerDB(DB_PATH)
     print(f"[*] SQLite journal_mode={db.journal_mode()} path={DB_PATH}")
+    if args.from_disk:
+        n = ingest_disk_contracts(db, args.contracts_root)
+        print(f"[*] Ingested {n} on-disk contract folders (INSERT OR IGNORE)")
 
     os.makedirs(TRIAGE_DIR, exist_ok=True)
     if not args.keep_queue:
