@@ -1,9 +1,7 @@
 import json
 import os
-import re
-import time
 import requests
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, Optional, Tuple, Set
 
 EXPLORER_CONFIGS = {
     "base": {
@@ -61,7 +59,7 @@ class EVMExtractor:
         chain_lower = chain.lower()
         if chain_lower not in EXPLORER_CONFIGS:
             raise ValueError(f"Unsupported chain: {chain}. Supported: {list(EXPLORER_CONFIGS.keys())}")
-        
+
         self.chain = chain_lower
         self.config = EXPLORER_CONFIGS[chain_lower]
         self.api_key = api_key or os.getenv(self.config["env_key"], "")
@@ -94,7 +92,7 @@ class EVMExtractor:
                                 contracts_found.add(to_item.get("hash", "").lower())
                             elif to_item.get("hash"):
                                 contracts_found.add(to_item.get("hash", "").lower())
-                        
+
                         created_contract = item.get("created_contract")
                         if created_contract and isinstance(created_contract, dict):
                             contracts_found.add(created_contract.get("hash", "").lower())
@@ -166,7 +164,7 @@ class EVMExtractor:
         Uses Blockscout v2 REST API -> Explorer API -> Sourcify.
         """
         contract_address = contract_address.lower().strip()
-        
+
         # 1. Blockscout v2 REST API (Reliable & No rate-limit/key)
         bs_v2 = self.config.get("blockscout_v2")
         if bs_v2:
@@ -181,7 +179,7 @@ class EVMExtractor:
                         main_file = data.get("file_path") or f"{data.get('name', 'Contract')}.sol"
                         if data.get("source_code"):
                             sources[main_file] = data.get("source_code")
-                        
+
                         # Additional sources for multi-file contracts
                         for add_src in data.get("additional_sources", []):
                             file_path = add_src.get("file_path") or "Additional.sol"
@@ -306,7 +304,7 @@ class EVMExtractor:
         """Downloads and extracts Solidity code, ABI, and metadata."""
         contract_address = contract_address.strip().lower()
         source_data = self.fetch_verified_source(contract_address)
-        
+
         target_dir = os.path.join(output_base_dir, self.chain, contract_address)
         os.makedirs(target_dir, exist_ok=True)
 
@@ -338,7 +336,7 @@ class EVMExtractor:
         metadata["optimization"] = source_data.get("OptimizationUsed", "")
         metadata["runs"] = source_data.get("Runs", "")
         metadata["evm_version"] = source_data.get("EVMVersion", "")
-        
+
         impl = self.detect_proxy_implementation(contract_address, source_data)
         if impl:
             metadata["proxy"] = True
@@ -355,7 +353,7 @@ class EVMExtractor:
                 abi_parsed = json.loads(abi_str)
             except Exception:
                 pass
-        
+
         category, tags, conf = ContractClassifier.classify(metadata, abi=abi_parsed, source_code=source_data.get("raw_source", ""))
         metadata["category"] = category
         metadata["tags"] = tags

@@ -3,17 +3,37 @@ pragma solidity 0.8.20;
 
 contract MockWETH {
     string public name = "Wrapped Ether";
-    string public symbol = "WETH";
     uint8 public decimals = 18;
     mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
 
     function deposit() public payable {
         balanceOf[msg.sender] += msg.value;
     }
 
+    function mint(address to, uint256 amount) public {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 amount) public returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
     function transfer(address to, uint256 amount) public returns (bool) {
         require(balanceOf[msg.sender] >= amount, "Balance low");
         balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public returns (bool) {
+        if (msg.sender != from && allowance[from][msg.sender] != type(uint256).max) {
+            require(allowance[from][msg.sender] >= amount, "Allowance low");
+            allowance[from][msg.sender] -= amount;
+        }
+        require(balanceOf[from] >= amount, "Balance low");
+        balanceOf[from] -= amount;
         balanceOf[to] += amount;
         return true;
     }

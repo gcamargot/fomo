@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  fomo:
+    image: ghcr.io/gcamargot/fomo:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fomo-security-suite
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - SCANNER_CHAINS=${SCANNER_CHAINS:-base,arbitrum,ethereum,solana}
+      - SCANNER_INTERVAL=${SCANNER_INTERVAL:-60}
+      - DORMANT_INTERVAL=${DORMANT_INTERVAL:-120}
+      - BASESCAN_API_KEY=${BASESCAN_API_KEY:-}
+      - ETHERSCAN_API_KEY=${ETHERSCAN_API_KEY:-}
+      - ARBISCAN_API_KEY=${ARBISCAN_API_KEY:-}
+      - OPTIMISTIC_API_KEY=${OPTIMISTIC_API_KEY:-}
+      - POLYGONSCAN_API_KEY=${POLYGONSCAN_API_KEY:-}
+      - BSCSCAN_API_KEY=${BSCSCAN_API_KEY:-}
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - BASE_RPC_URL=${BASE_RPC_URL:-https://mainnet.base.org}
+    volumes:
+      - ./contracts:/app/contracts
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

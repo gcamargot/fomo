@@ -1,1 +1,60 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Aider & AI tool cache
 .aider*
+
+# Logs
+*.log
+scanner*.log
+dormant_watcher*.log
+reverify*.log
+
+# Databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# Node
+node_modules/
+*/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Smart Contracts Data & Generated Datasets
+contracts/
+tmp/
+tmp
+
+# Foundry / Solidity compilation artifacts
+simulations/cache/
+simulations/out/
+simulations/broadcast/
+Exploits/cache/
+Exploits/out/
+Exploits/broadcast/
+
+# OS Artifacts
+.DS_Store
+Thumbs.db

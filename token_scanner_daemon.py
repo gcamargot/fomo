@@ -9,20 +9,18 @@ structured Triage Cards (.md) for manual verification and False/True Positive tr
 """
 
 import os
-import sys
 import time
 import json
 import sqlite3
 import re
 import argparse
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 
 from evm_extractor import EVMExtractor
-from classifier import ContractClassifier
 from analyzer import ContractAnalyzer
 
 console = Console()
@@ -201,12 +199,12 @@ class TriageReportGenerator:
         addr = contract_data["address"].lower()
         chain = contract_data.get("chain", "base")
         name = contract_data.get("name", "Unknown")
-        
+
         file_name = f"triage_{chain}_{addr}.md"
         full_path = os.path.join(output_dir, file_name)
 
         md = []
-        md.append(f"# 🛡️ Triage Card: User-Exploitable Vulnerability Assessment\n")
+        md.append("# 🛡️ Triage Card: User-Exploitable Vulnerability Assessment\n")
         md.append(f"**Contract Name:** `{name}`  \n")
         md.append(f"**Address:** [`{addr}`](https://basescan.org/address/{addr})  \n")
         md.append(f"**Blockchain:** `{chain.upper()}` | **Compiler:** `{contract_data.get('compiler', 'Unknown')}`  \n")
@@ -218,7 +216,7 @@ class TriageReportGenerator:
 
         for idx, exp in enumerate(user_exploits, 1):
             md.append(f"### {idx}. [{exp['severity']}] {exp['title']}\n")
-            md.append(f"* **¿Es explotable por un usuario común?:** `SÍ` (No requiere permisos de administrador ni de owner).\n")
+            md.append("* **¿Es explotable por un usuario común?:** `SÍ` (No requiere permisos de administrador ni de owner).\n")
             md.append(f"* **Perfil del Atacante:** {exp['exploiter']}\n")
             md.append(f"* **Víctima Afectada:** {exp['victim']}\n")
             md.append(f"* **Beneficio / Payoff Esperado:** {exp['payoff']}\n\n")
@@ -321,12 +319,12 @@ class TokenScannerDaemon:
 
             # Filter for user-exploitable vulnerabilities
             user_exploits = [e for e in evidence_list if e.get("user_exploitable", False)]
-            
+
             if user_exploits:
                 scan_result["is_user_exploitable"] = True
                 triage_path = TriageReportGenerator.generate_triage_file(scan_result, user_exploits)
                 scan_result["triage_file_path"] = triage_path
-                
+
                 console.print(Panel(
                     f"[bold red]⚠️ USER-EXPLOITABLE VULNERABILITY DETECTED![/]\n\n"
                     f"[bold green]Contract:[/] {meta.get('contract_name')} ({address})\n"

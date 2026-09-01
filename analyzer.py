@@ -1,7 +1,7 @@
 import json
 import os
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 class ContractAnalyzer:
     def __init__(self, slither_path: str = "slither"):
@@ -16,7 +16,7 @@ class ContractAnalyzer:
             raise FileNotFoundError(f"Target path does not exist: {target_path}")
 
         json_out = os.path.join(output_report_dir or os.path.dirname(target_path), "slither_report.json")
-        
+
         # Run slither command with JSON output
         cmd = [
             self.slither_path,
@@ -47,16 +47,16 @@ class ContractAnalyzer:
             try:
                 with open(json_out, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                
+
                 results["success"] = data.get("success", False)
                 detectors = data.get("results", {}).get("detectors", [])
-                
+
                 for d in detectors:
                     impact = d.get("impact", "Informational")
                     confidence = d.get("confidence", "Unknown")
                     check = d.get("check", "")
                     description = d.get("description", "").strip()
-                    
+
                     if impact in results["findings_summary"]:
                         results["findings_summary"][impact] += 1
                     else:
@@ -84,7 +84,7 @@ class ContractAnalyzer:
         detectors = analysis_result.get("detectors", [])
 
         md = []
-        md.append(f"# Static Analysis Security Report\n")
+        md.append("# Static Analysis Security Report\n")
         md.append(f"**Target:** `{target}`  \n")
         md.append(f"**Total Findings:** {len(detectors)}  \n\n")
 

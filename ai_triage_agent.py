@@ -7,12 +7,11 @@ Ensures only 1 Ollama LLM instance runs at any given time to protect local hardw
 """
 
 import os
-import json
 import queue
 import threading
 import requests
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "triage-agent")
@@ -94,7 +93,7 @@ class AIAgentTriager:
 
             # Prevent duplicate reports if already appended
             if "Automated AI Agent Triage Report" in card_content:
-                print(f"[🤖 AI AGENT] Card already triaged by agent. Skipping duplicate.")
+                print("[🤖 AI AGENT] Card already triaged by agent. Skipping duplicate.")
                 return
 
             prompt = (

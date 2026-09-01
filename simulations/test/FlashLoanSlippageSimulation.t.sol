@@ -51,8 +51,7 @@ contract FlashLoanSlippageSimulationTest {
         highLiqPair = new MockUniswapV2Pair{value: 200 ether}(20_000_000 ether, 200 ether);
         lowLiqPair = new MockUniswapV2Pair{value: 1.30 ether}(130_000 ether, 1.30 ether);
 
-        // Set up the environment to connect to BASE Mainnet
-        vm.createSelectFork(vm.envString("BASE_RPC_URL"));
+        // Standalone simulation using MockUniswapV2Pair
     }
 
     // SCENARIO 1: High Liquidity Pool (200 ETH) -> 0.6% DEX Fee Friction Prevents Extraction

@@ -60,7 +60,7 @@ class SolanaExtractor:
         """
         wallet_address = wallet_address.strip()
         signatures = self.get_wallet_signatures(wallet_address, limit=tx_limit)
-        
+
         programs_found: Set[str] = set()
         token_mints: Set[str] = set()
         tx_summaries: List[Dict] = []
@@ -76,7 +76,7 @@ class SolanaExtractor:
             meta = tx_data.get("meta", {})
             transaction = tx_data.get("transaction", {})
             message = transaction.get("message", {})
-            
+
             # Extract instructions
             instructions = message.get("instructions", [])
             inner_instructions = meta.get("innerInstructions", [])
@@ -123,7 +123,7 @@ class SolanaExtractor:
         program_id = program_id.strip()
         target_dir = os.path.join(output_base_dir, "solana", program_id)
         os.makedirs(target_dir, exist_ok=True)
-        
+
         output_so_path = os.path.join(target_dir, f"{program_id}.so")
         metadata = {
             "program_id": program_id,

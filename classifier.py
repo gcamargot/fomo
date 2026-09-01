@@ -1,10 +1,8 @@
-import json
-import os
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 class ContractClassifier:
     """
-    Classifies smart contracts based on ABI function selectors, events, 
+    Classifies smart contracts based on ABI function selectors, events,
     source code interfaces, and bytecode inspection for academic dataset categorization.
     """
 

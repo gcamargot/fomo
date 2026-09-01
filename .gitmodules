@@ -1,0 +1,9 @@
+[submodule "Exploits/lib/openzeppelin-contracts"]
+	path = Exploits/lib/openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
+[submodule "Exploits/lib/v2-core"]
+	path = Exploits/lib/v2-core
+	url = https://github.com/Uniswap/v2-core
+[submodule "Exploits/lib/v2-periphery"]
+	path = Exploits/lib/v2-periphery
+	url = https://github.com/Uniswap/v2-periphery

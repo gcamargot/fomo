@@ -28,7 +28,7 @@ contract VulnerableVault {
 
         require(shares > 0, "Zero shares minted");
 
-        require(asset.transfer(address(this), assets), "Transfer in failed");
+        require(asset.transferFrom(msg.sender, address(this), assets), "Transfer in failed");
         
         totalShares += shares;
         balanceOf[receiver] += shares;
@@ -67,7 +67,7 @@ contract SecureVault {
         shares = (assets * (totalShares + VIRTUAL_OFFSET)) / (totalAssets() + 1);
 
         require(shares > 0, "Zero shares minted");
-        require(asset.transfer(address(this), assets), "Transfer in failed");
+        require(asset.transferFrom(msg.sender, address(this), assets), "Transfer in failed");
         
         totalShares += shares;
         balanceOf[receiver] += shares;

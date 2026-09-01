@@ -8,7 +8,6 @@ interacted with by wallets across EVM (Base, Ethereum, Arbitrum, BSC) and Solana
 
 import argparse
 import os
-import sys
 import json
 from rich.console import Console
 from rich.table import Table
@@ -17,7 +16,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from evm_extractor import EVMExtractor, EXPLORER_CONFIGS
 from solana_extractor import SolanaExtractor, KNOWN_PROGRAMS
-from classifier import ContractClassifier
 from analyzer import ContractAnalyzer
 from dataset_metrics import DatasetMetricsGenerator
 
@@ -34,9 +32,9 @@ def process_evm_wallet(wallet: str, chain: str, output_dir: str, api_key: str, a
     console.print(f"[bold cyan]🔍 Inspecting EVM Wallet:[/] {wallet} on [green]{chain.upper()}[/]")
     if category_filter != "ALL":
         console.print(f"[bold yellow]Filter Active:[/] Only downloading category [magenta]{category_filter}[/]")
-    
+
     extractor = EVMExtractor(chain=chain, api_key=api_key)
-    
+
     with console.status("[bold yellow]Querying transaction history & contract interactions...[/]"):
         contracts = extractor.get_wallet_contract_interactions(wallet)
 
@@ -59,7 +57,7 @@ def process_evm_wallet(wallet: str, chain: str, output_dir: str, api_key: str, a
         transient=True
     ) as progress:
         task = progress.add_task("[cyan]Downloading & classifying...", total=len(contracts))
-        
+
         for idx, addr in enumerate(contracts, 1):
             progress.update(task, description=f"Processing {addr[:10]}... ({idx}/{len(contracts)})")
             verified, path, meta = extractor.save_contract(addr, output_dir)
@@ -75,7 +73,7 @@ def process_evm_wallet(wallet: str, chain: str, output_dir: str, api_key: str, a
                 status_str += f"\n[blue]↳ Proxy to: {meta.get('implementation')[:10]}...[/]"
                 # Download implementation as well
                 extractor.save_contract(meta["implementation"], output_dir)
-            
+
             table.add_row(str(idx), addr, f"[bold]{cat}[/]", status_str)
             results.append((addr, verified, path, meta))
             progress.advance(task)
@@ -89,7 +87,7 @@ def process_evm_wallet(wallet: str, chain: str, output_dir: str, api_key: str, a
 def process_evm_contract(contract: str, chain: str, output_dir: str, api_key: str, auto_scan: bool):
     console.print(f"[bold cyan]📥 Fetching EVM Contract:[/] {contract} on [green]{chain.upper()}[/]")
     extractor = EVMExtractor(chain=chain, api_key=api_key)
-    
+
     with console.status("[bold yellow]Downloading source & metadata...[/]"):
         verified, path, meta = extractor.save_contract(contract, output_dir)
 
@@ -125,7 +123,7 @@ def process_evm_contract(contract: str, chain: str, output_dir: str, api_key: st
 def process_solana_wallet(wallet: str, output_dir: str, rpc_url: str):
     console.print(f"[bold cyan]🔍 Inspecting Solana Wallet:[/] {wallet}")
     extractor = SolanaExtractor(rpc_url=rpc_url)
-    
+
     with console.status("[bold yellow]Analyzing Solana transactions & program calls...[/]"):
         data = extractor.inspect_wallet_interactions(wallet)
 
@@ -142,7 +140,7 @@ def process_solana_wallet(wallet: str, output_dir: str, rpc_url: str):
     for prog in programs:
         name = KNOWN_PROGRAMS.get(prog, "Third-Party / Custom Program")
         success, path, meta = extractor.dump_program_binary(prog, output_dir)
-        action_text = f"[green]Dumped .so binary[/]" if success else "[yellow]Logged account metadata[/]"
+        action_text = "[green]Dumped .so binary[/]" if success else "[yellow]Logged account metadata[/]"
         table.add_row(prog, name, action_text)
 
     console.print(table)
@@ -159,7 +157,7 @@ def process_solana_wallet(wallet: str, output_dir: str, rpc_url: str):
 def run_batch_analysis(results, output_dir):
     console.print("\n[bold magenta]🔬 Running Automated Static Analysis on Downloaded Contracts...[/]")
     analyzer = ContractAnalyzer()
-    
+
     for addr, verified, path, meta in results:
         if not verified:
             continue
@@ -195,7 +193,7 @@ def generate_and_display_metrics(dataset_dir: str):
     cat_table.add_column("Category", style="yellow")
     cat_table.add_column("Count", style="green", justify="right")
     cat_table.add_column("Percentage", style="cyan", justify="right")
-    
+
     total = max(1, metrics["total_contracts"])
     for cat, count in sorted(metrics["categories"].items(), key=lambda x: x[1], reverse=True):
         cat_table.add_row(cat, str(count), f"{(count/total)*100:.1f}%")
@@ -228,7 +226,7 @@ def main():
     parser.add_argument("--contract", help="Single EVM contract address to download")
     parser.add_argument("--solana-wallet", help="Solana wallet address (e.g. 321v1oGkFAHnz89w2WL9YKj86PqHHtB48bvrap84sEMP)")
     parser.add_argument("--solana-program", help="Solana Program ID to dump binary for")
-    
+
     # Options & Classification
     parser.add_argument("--chain", default="base", choices=list(EXPLORER_CONFIGS.keys()), help="EVM Chain (default: base)")
     parser.add_argument("--category", default="ALL", choices=[c.lower() for c in CATEGORIES_LIST] + CATEGORIES_LIST, help="Filter downloads by contract category (e.g. erc20_token, dex_router_aggregator, proxy_factory)")

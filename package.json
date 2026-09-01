@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "@ethersproject/abi": "^5.8.0"
+  }
+}
