@@ -34,6 +34,106 @@ def _topic0(log: Dict[str, Any]) -> str:
     return t if t.startswith("0x") else "0x" + t
 
 
+# Aave V3 Pool proxies (LiquidationCall). HTTP getLogs allowlist only.
+AAVE_V3_POOLS: Dict[str, List[str]] = {
+    "ethereum": ["0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2"],
+    "base": ["0xa238dd80c259a72e81d7e4664a9801593f98d1c5"],
+    "arbitrum": ["0x794a61358d6845594f94dc1db02a252b5b4814ad"],
+}
+
+
+def pair_map_from_rows(rows: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    """chain -> {pair: token} from watchlist rows with state_snapshot.pair."""
+    import json
+
+    out: Dict[str, Dict[str, str]] = {}
+    for row in rows:
+        chain = str(row.get("chain") or "").lower()
+        token = str(row.get("address") or "").lower()
+        if not chain or not token:
+            continue
+        if not (
+            row.get("has_public_swapback")
+            or row.get("has_zero_slippage")
+        ):
+            continue
+        raw = row.get("state_snapshot")
+        pair = None
+        if raw:
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                pair = (data or {}).get("pair")
+            except (TypeError, json.JSONDecodeError):
+                pair = None
+        if not pair:
+            continue
+        out.setdefault(chain, {})[str(pair).lower()] = token
+    return out
+
+
+def rows_with_pair_snapshots(db) -> List[Dict[str, Any]]:
+    """Tokens with swapBack/zero-slippage flags and a stored pair address."""
+    conn = db.get_connection()
+    try:
+        cur = conn.execute(
+            """
+            SELECT address, chain, name, has_public_swapback, has_zero_slippage, state_snapshot
+            FROM tokens
+            WHERE IFNULL(is_user_exploitable, 0) = 0
+              AND (
+                    IFNULL(has_public_swapback, 0) = 1
+                 OR IFNULL(has_zero_slippage, 0) = 1
+              )
+              AND state_snapshot IS NOT NULL
+              AND state_snapshot != ''
+            """
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def load_pair_maps(db) -> Dict[str, Dict[str, str]]:
+    return pair_map_from_rows(rows_with_pair_snapshots(db))
+
+
+def fetch_token_row(db, address: str) -> Optional[Dict[str, Any]]:
+    conn = db.get_connection()
+    try:
+        cur = conn.execute(
+            """
+            SELECT address, chain, name, has_public_swapback, has_zero_slippage,
+                   state_snapshot, dynamic_status
+            FROM tokens WHERE address = ?
+            """,
+            (address.lower(),),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    finally:
+        conn.close()
+
+
+def wakeup_from_swap(
+    db,
+    chain: str,
+    token: str,
+    check_fn: Callable[[Dict[str, Any]], bool],
+) -> bool:
+    """Re-run dormant liveness/profit for a token whose pair just swapped."""
+    try:
+        row = fetch_token_row(db, token) or {"address": token, "name": "FactoryPairToken"}
+        row["address"] = token
+        row["chain"] = chain
+        return bool(check_fn(row))
+    except Exception:
+        return False
+
+
 def tokens_from_swap_logs(
     logs: Iterable[Dict[str, Any]],
     pair_to_token: Dict[str, str],
@@ -171,7 +271,10 @@ def main() -> None:
 
     from token_scanner_daemon import DEX_CONFIG, RPC_ENDPOINTS, TokenScannerDB
 
+    from dormant_monitor_daemon import DormantBalanceWatcher
+
     db = TokenScannerDB()
+    dormant = DormantBalanceWatcher()
     clients = {}
     if Web3 is not None:
         for chain in DEX_CONFIG:
@@ -185,14 +288,21 @@ def main() -> None:
                     continue
 
     def _tick():
+        pair_maps = load_pair_maps(db)
         n = run_log_watch_cycle(
             db,
             clients,
-            pair_to_token_by_chain={},
-            liq_pools_by_chain={},
+            pair_to_token_by_chain=pair_maps,
+            liq_pools_by_chain=AAVE_V3_POOLS,
             lookback=args.lookback,
+            on_swap_token=lambda chain, tok: wakeup_from_swap(
+                db, chain, tok, dormant.check_and_update_contract
+            ),
         )
-        print(f"[log_watcher] hits={n} chains={list(clients)}")
+        print(
+            f"[log_watcher] hits={n} pairs={sum(len(m) for m in pair_maps.values())} "
+            f"chains={list(clients)}"
+        )
 
     if args.once:
         _tick()

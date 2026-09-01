@@ -127,3 +127,16 @@ def test_roundtrip_dict():
     assert restored == snap
     assert snapshot_from_dict(None) is None
     assert snapshot_from_dict({}) is None
+
+
+def test_capture_snapshot_without_w3_does_not_raise(monkeypatch):
+    import dormant_monitor_daemon as dmd
+
+    watcher = dmd.DormantBalanceWatcher.__new__(dmd.DormantBalanceWatcher)
+    watcher.web3_clients = {}
+    monkeypatch.setattr(
+        dmd.OnChainStateVerifier, "get_web3_client", staticmethod(lambda chain: None)
+    )
+    snap = watcher.capture_snapshot("0x" + "e" * 40, "base", "")
+    assert snap.pair is None
+    assert snap.pool_eth == 0.0

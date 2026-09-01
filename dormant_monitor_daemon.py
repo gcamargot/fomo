@@ -82,6 +82,7 @@ class DormantBalanceWatcher:
         pool_eth = 0.0
         treasury = 0.0
         swap_enabled = None
+        pair = None
         if w3:
             try:
                 c_addr = w3.to_checksum_address(addr)
@@ -98,6 +99,8 @@ class DormantBalanceWatcher:
             try:
                 amm = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, addr)
                 pool_eth = float(amm.get("eth_reserve") or 0.0)
+                primary = amm.get("primary_pool") or {}
+                pair = primary.get("pair")
             except Exception:
                 pass
         return StateSnapshot(
@@ -105,6 +108,7 @@ class DormantBalanceWatcher:
             pool_eth=pool_eth,
             treasury_tokens=treasury,
             swap_enabled=swap_enabled,
+            pair=str(pair).lower() if pair else None,
         )
 
     def _mark_checked(

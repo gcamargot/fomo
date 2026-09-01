@@ -196,7 +196,7 @@ _TOKEN_UPDATE_COLUMNS = frozenset({
     "has_public_swapback", "triage_file_path",
     "slither_high", "slither_medium", "slither_low",
     "expected_profit_eth", "last_checked_at", "next_check_at", "watch_bucket",
-    "state_snapshot",
+    "state_snapshot", "verified",
 })
 
 

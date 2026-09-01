@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from log_sync import chunk_block_range, cursor_key, next_cursor, normalize_log
 from profit_estimator import ProfitEstimate
+from state_delta import StateSnapshot, snapshot_to_dict
 
 try:
     from web3 import Web3
@@ -88,6 +90,239 @@ def should_emit_factory_triage(
     )
 
 
+_PAIR_ABI = [
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "getReserves",
+        "outputs": [
+            {"name": "_reserve0", "type": "uint112"},
+            {"name": "_reserve1", "type": "uint112"},
+            {"name": "_blockTimestampLast", "type": "uint32"},
+        ],
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "token0",
+        "outputs": [{"name": "", "type": "address"}],
+        "type": "function",
+    },
+]
+_ERC20_BAL_ABI = [
+    {
+        "inputs": [{"name": "account", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+_AUDIT_FLAG_COLS = (
+    "has_public_swapback",
+    "has_zero_slippage",
+    "has_unprotected_critical_function",
+    "has_unprotected_initializer",
+    "has_arbitrary_call",
+    "has_reentrancy_flaw",
+    "has_dynamic_taxes",
+)
+
+
+def _checksum(w3, addr: str) -> str:
+    fn = getattr(w3, "to_checksum_address", None)
+    return fn(addr) if callable(fn) else addr
+
+
+def pair_reserves_eth_token(w3, pair: str, weth: str) -> Tuple[float, float]:
+    """Return (pool_eth, pool_token) from a UniV2 pair. (0, 0) on RPC errors."""
+    if w3 is None or not pair:
+        return 0.0, 0.0
+    try:
+        pair_c = w3.eth.contract(address=_checksum(w3, pair), abi=_PAIR_ABI)
+        r0, r1, _ = pair_c.functions.getReserves().call()
+        t0 = pair_c.functions.token0().call()
+        weth_is_t0 = str(t0).lower() == weth.lower()
+        eth_reserve = (r0 if weth_is_t0 else r1) / 1e18
+        token_reserve = (r1 if weth_is_t0 else r0) / 1e18
+        return float(eth_reserve), float(token_reserve)
+    except Exception:
+        return 0.0, 0.0
+
+
+def erc20_balance_raw(w3, token: str, holder: str) -> int:
+    if w3 is None or not token or not holder:
+        return 0
+    try:
+        c = w3.eth.contract(address=_checksum(w3, token), abi=_ERC20_BAL_ABI)
+        return int(c.functions.balanceOf(_checksum(w3, holder)).call() or 0)
+    except Exception:
+        return 0
+
+
+def process_factory_pair(
+    db,
+    chain: str,
+    ev: Dict[str, str],
+    *,
+    load_source,
+    audit,
+    verify,
+    generate_triage,
+    estimate,
+    reserves,
+    treasury_raw,
+    fork_result=None,
+    fork_run=None,
+) -> bool:
+    """Ingest a new WETH pair: persist row, profit estimate, optional full pipeline.
+
+    Returns True if a triage card was written.
+    """
+    from fork_profit_gate import ForkGateResult, should_emit_triage
+
+    token = ev["token"]
+    db.ensure_token_row(
+        address=token,
+        chain=chain,
+        name="FactoryPairToken",
+        category="ERC20_TOKEN",
+        verified=False,
+    )
+    pool_eth, pool_token = 0.0, 0.0
+    try:
+        pool_eth, pool_token = reserves()
+    except Exception:
+        pass
+    raw = 0
+    try:
+        raw = int(treasury_raw() or 0)
+    except Exception:
+        raw = 0
+    est = estimate(
+        pool_eth=float(pool_eth or 0.0),
+        pool_token=float(pool_token or 0.0),
+        sell_token=(raw / 1e18) * 0.25 if raw else 0.0,
+        treasury_token_raw=raw,
+    )
+    src = load_source(chain, token) or ""
+    flags: Dict[str, Any] = {}
+    user_exploits: list = []
+    if src:
+        flags, evidence = audit(src)
+        user_exploits = [e for e in (evidence or []) if e.get("user_exploitable")]
+    verified = bool(src)
+    status = "FACTORY_NEW_PAIR_NO_SOURCE"
+    profit_payload = None
+    confirmed: list = []
+    is_active = False
+    if src and user_exploits:
+        is_active, status, _eth, confirmed, profit_payload = verify(
+            token, chain, user_exploits, src
+        )
+    else:
+        from profit_estimator import profit_to_dict
+        profit_payload = profit_to_dict(est)
+        status = (
+            "FACTORY_NEW_PAIR_ACTIONABLE"
+            if est.actionable
+            else "FACTORY_NEW_PAIR_DUST"
+        )
+
+    emit = False
+    if src and user_exploits:
+        emit = bool(is_active and confirmed)
+        fr = fork_result
+        if fr is None and fork_run is not None and emit:
+            try:
+                fr = fork_run()
+            except Exception:
+                fr = ForkGateResult(passed=False, skipped=False, reason="fork_error")
+        if fr is None:
+            fr = ForkGateResult(passed=True, skipped=True, reason="disabled")
+        if emit and not should_emit_triage(
+            is_active=True, confirmed=confirmed, fork_result=fr
+        ):
+            emit = False
+            status = f"{status} | FORK_GATE_{fr.reason.upper()}"
+    else:
+        emit = should_emit_factory_triage(
+            verified=verified,
+            has_source=bool(src),
+            flags=flags or {},
+            estimate=est,
+        )
+
+    pair = str(ev.get("pair") or "").lower() or None
+    fields: Dict[str, Any] = {
+        "dynamic_status": status,
+        "expected_profit_eth": (
+            (profit_payload or {}).get("expected_profit_eth")
+            if profit_payload
+            else est.expected_profit_eth
+        ),
+        "state_snapshot": json.dumps(
+            snapshot_to_dict(
+                StateSnapshot(
+                    pool_eth=float(pool_eth or 0.0),
+                    treasury_tokens=(raw / 1e18) if raw else 0.0,
+                    pair=pair,
+                )
+            )
+        ),
+    }
+    if src:
+        fields["verified"] = 1
+    for col in _AUDIT_FLAG_COLS:
+        if flags.get(col):
+            fields[col] = 1
+    if emit and (confirmed or user_exploits):
+        meta = {
+            "address": token,
+            "chain": chain,
+            "name": "FactoryPairToken",
+            "dynamic_status": status,
+            "profit": profit_payload,
+        }
+        exploits = confirmed or user_exploits
+        path = generate_triage(meta, exploits)
+        fields["is_user_exploitable"] = 1
+        fields["onchain_verified"] = 1
+        fields["triage_file_path"] = path
+        db.update_token_flags(token, fields)
+        return True
+    db.update_token_flags(token, fields)
+    return False
+
+
+def handle_factory_pair(db, chain: str, ev: Dict[str, str], w3) -> bool:
+    """Live daemon hook: source + reserves + profit + optional fork/triage."""
+    from fork_profit_gate import run_fork_profit_test
+    from profit_estimator import estimate_swapback_sandwich_profit
+    from token_scanner_daemon import (
+        OnChainStateVerifier,
+        StaticVulnerabilityAuditor,
+        TriageReportGenerator,
+        load_saved_source,
+    )
+
+    token = ev["token"]
+    return process_factory_pair(
+        db,
+        chain,
+        ev,
+        load_source=load_saved_source,
+        audit=StaticVulnerabilityAuditor.audit_source,
+        verify=OnChainStateVerifier.verify_onchain_liveness,
+        generate_triage=TriageReportGenerator.generate_triage_file,
+        estimate=lambda **k: estimate_swapback_sandwich_profit(**k),
+        reserves=lambda: pair_reserves_eth_token(w3, ev.get("pair") or "", ev.get("weth") or ""),
+        treasury_raw=lambda: erc20_balance_raw(w3, token, token),
+        fork_run=lambda: run_fork_profit_test(token, chain),
+    )
+
+
 def factory_listener_enabled() -> bool:
     raw = os.environ.get("FOMO_FACTORY_LISTENER", "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
@@ -136,6 +371,7 @@ def run_factory_cycle(
                     ev = decode_pair_created(normalize_log(log), weth=weth)
                     if not ev:
                         continue
+                    found += 1
                     db.ensure_token_row(
                         address=ev["token"],
                         chain=chain,
@@ -143,7 +379,6 @@ def run_factory_cycle(
                         category="ERC20_TOKEN",
                         verified=False,
                     )
-                    found += 1
                     if on_pair:
                         on_pair(chain, ev)
                 db.set_cursor(key, next_cursor(last, end))
@@ -181,7 +416,13 @@ def main() -> None:
                     continue
 
     def _tick():
-        n = run_factory_cycle(db, clients, lookback=args.lookback)
+        def on_pair(chain: str, ev: Dict[str, str]) -> None:
+            try:
+                handle_factory_pair(db, chain, ev, clients.get(chain))
+            except Exception as e:
+                print(f"[factory_listener] on_pair {ev.get('token')}: {e}")
+
+        n = run_factory_cycle(db, clients, lookback=args.lookback, on_pair=on_pair)
         print(f"[factory_listener] pairs={n} chains={list(clients)}")
 
     if args.once:

@@ -17,6 +17,7 @@ class StateSnapshot:
     treasury_tokens: float = 0.0
     swap_enabled: Optional[bool] = None
     erc20_treasury_eth: float = 0.0
+    pair: Optional[str] = None
 
 
 def snapshot_to_dict(snap: StateSnapshot) -> Dict[str, Any]:
@@ -39,6 +40,7 @@ def snapshot_from_dict(data: Optional[Dict[str, Any]]) -> Optional[StateSnapshot
             treasury_tokens=float(data.get("treasury_tokens") or 0.0),
             swap_enabled=se,
             erc20_treasury_eth=float(data.get("erc20_treasury_eth") or 0.0),
+            pair=(str(data["pair"]).lower() if data.get("pair") else None),
         )
     except (TypeError, ValueError):
         return None
