@@ -1642,7 +1642,7 @@ class TriageReportGenerator:
         md.append("- [ ] **Paso 1: Verificación de Parámetros On-Chain** (Fondos en balance, pair con liquidez)\n")
         md.append("- [ ] **Paso 2: Confirmación de Lógica y Parámetros Vulnerables**\n")
         md.append("### Veredicto del Triage:\n")
-        md.append("- **Resultado:** `[x] True Positive (TP)` | `[ ] False Positive (FP)`\n")
+        md.append("- **Resultado:** `[ ] True Positive (TP)` | `[ ] False Positive (FP)`\n")
         md.append("- **Confianza:** `[ ] Alta` | `[ ] Media` | `[ ] Baja`\n")
 
         content = "\n".join(md)
