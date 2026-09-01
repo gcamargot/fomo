@@ -91,12 +91,13 @@ def test_profit_gate_filters_public_swapback_dust():
         eth_balance=0.0,
         pool_eth=0.0006,
         pool_token=50_000.0,
-        treasury_token=10_000.0,
+        treasury_token_raw=10_000 * 10**18,
         enabled=True,
     )
     assert kept == []
     assert any("PROFIT_BELOW_THRESHOLD" in n for n in notes)
     assert est is not None and est.actionable is False
+    assert est.treasury_token_raw == 10_000 * 10**18
 
 
 def test_profit_gate_keeps_profitable_swapback():
@@ -106,12 +107,13 @@ def test_profit_gate_keeps_profitable_swapback():
         eth_balance=0.0,
         pool_eth=25.0,
         pool_token=500_000.0,
-        treasury_token=80_000.0,
+        treasury_token_raw=80_000 * 10**18,
         enabled=True,
     )
     assert len(kept) == 1
     assert est is not None and est.actionable is True
     assert notes == []
+    assert est.treasury_token_raw == 80_000 * 10**18
 
 
 def test_profit_gate_disabled_passthrough():
@@ -121,7 +123,7 @@ def test_profit_gate_disabled_passthrough():
         eth_balance=0.0,
         pool_eth=0.0001,
         pool_token=1.0,
-        treasury_token=1.0,
+        treasury_token_raw=10**18,
         enabled=False,
     )
     assert kept == confirmed

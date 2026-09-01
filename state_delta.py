@@ -27,7 +27,10 @@ def snapshot_from_dict(data: Optional[Dict[str, Any]]) -> Optional[StateSnapshot
         return None
     try:
         se = data.get("swap_enabled")
-        if se is not None:
+        if isinstance(se, str):
+            se_l = se.strip().lower()
+            se = None if se_l in {"", "none", "null"} else se_l not in {"0", "false", "no", "off"}
+        elif se is not None:
             se = bool(se)
         return StateSnapshot(
             eth_balance=float(data.get("eth_balance") or 0.0),

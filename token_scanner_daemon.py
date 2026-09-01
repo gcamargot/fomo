@@ -46,6 +46,21 @@ DB_PATH = "./contracts/token_research_dataset.db"
 TRIAGE_DIR = "./contracts/triage_queue"
 ALERTS_LOG = "./contracts/ALERTS.log"
 
+EXPLORER_ADDRESS_URL = {
+    "ethereum": "https://etherscan.io/address/{addr}",
+    "arbitrum": "https://arbiscan.io/address/{addr}",
+    "base": "https://basescan.org/address/{addr}",
+    "optimism": "https://optimistic.etherscan.io/address/{addr}",
+    "polygon": "https://polygonscan.com/address/{addr}",
+    "bsc": "https://bscscan.com/address/{addr}",
+}
+
+
+def explorer_address_url(chain: str, address: str) -> str:
+    tmpl = EXPLORER_ADDRESS_URL.get((chain or "").lower(), "https://basescan.org/address/{addr}")
+    return tmpl.format(addr=address.lower())
+
+
 def load_saved_source(chain: str, address: str) -> str:
     src_dir = os.path.join("./contracts", chain.lower(), address.lower(), "src")
     if not os.path.isdir(src_dir):
@@ -1041,13 +1056,12 @@ class OnChainStateVerifier:
                     treasury_raw = int(treasury_raw)
                 except (TypeError, ValueError):
                     treasury_raw = 0
-                treasury_tokens = treasury_raw / 1e18 if treasury_raw else 0.0
                 kept, profit_notes, est = apply_profit_gate(
                     confirmed_exploits,
                     eth_balance=eth_balance,
                     pool_eth=float(amm_eval.get("eth_reserve") or 0.0),
                     pool_token=float(amm_eval.get("token_reserve") or 0.0),
-                    treasury_token=treasury_tokens,
+                    treasury_token_raw=treasury_raw,
                 )
                 if profit_notes:
                     status_notes.extend(profit_notes)
@@ -1605,7 +1619,9 @@ class TriageReportGenerator:
         md = []
         md.append("# 🛡️ Triage Card: User-Exploitable Vulnerability Assessment\n")
         md.append(f"**Contract Name:** `{name}`  \n")
-        md.append(f"**Address:** [`{addr}`](https://basescan.org/address/{addr})  \n")
+        md.append(
+            f"**Address:** [`{addr}`]({explorer_address_url(chain, addr)})  \n"
+        )
         md.append(f"**Blockchain:** `{chain.upper()}` | **Compiler:** `{contract_data.get('compiler', 'Unknown')}`  \n")
         md.append(f"**Live On-Chain Balance:** `{eth_bal:.4f} ETH`  \n")
         md.append(f"**Dynamic Verification Status:** `{contract_data.get('dynamic_status', 'CONFIRMED')}`  \n")
@@ -1935,6 +1951,11 @@ class MultiChainScannerDaemon:
             title="Multi-Chain Security & Invariant Verification Daemon",
             border_style="green bold"
         ))
+
+        if not self.workers:
+            console.print("[red]No chains configured (use --chains).[/]")
+            self.running = False
+            return
 
         with ThreadPoolExecutor(max_workers=len(self.workers)) as executor:
             for worker in self.workers:

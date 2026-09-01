@@ -9,6 +9,23 @@ def _s(**kw):
     return StateSnapshot(**base)
 
 
+def test_snapshot_from_dict_parses_string_false():
+    snap = snapshot_from_dict({
+        "eth_balance": 0.1,
+        "pool_eth": 1.0,
+        "treasury_tokens": 0,
+        "swap_enabled": "false",
+    })
+    assert snap is not None
+    assert snap.swap_enabled is False
+    snap0 = snapshot_from_dict({"swap_enabled": "0"})
+    assert snap0 is not None and snap0.swap_enabled is False
+    snap_none = snapshot_from_dict({"swap_enabled": "none"})
+    assert snap_none is not None and snap_none.swap_enabled is None
+    snap_true = snapshot_from_dict({"swap_enabled": "true"})
+    assert snap_true is not None and snap_true.swap_enabled is True
+
+
 def test_first_snapshot_always_wakes():
     assert should_wakeup(None, _s(eth_balance=0.0)) is True
 

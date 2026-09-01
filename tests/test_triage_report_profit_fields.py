@@ -2,7 +2,7 @@
 
 
 from profit_estimator import ProfitEstimate, profit_to_dict
-from token_scanner_daemon import TriageReportGenerator
+from token_scanner_daemon import TriageReportGenerator, explorer_address_url
 
 
 def _meta(**extra):
@@ -34,6 +34,19 @@ def _exploit(**extra):
     return e
 
 
+def test_explorer_address_url_by_chain():
+    assert "etherscan.io" in explorer_address_url("ethereum", "0xabc")
+    assert "arbiscan.io" in explorer_address_url("arbitrum", "0xabc")
+    assert "basescan.org" in explorer_address_url("base", "0xabc")
+
+
+def test_empty_chains_start_does_not_raise():
+    from token_scanner_daemon import MultiChainScannerDaemon
+    daemon = MultiChainScannerDaemon(chains=["", "  "], interval_seconds=1)
+    assert daemon.workers == []
+    daemon.start()
+
+
 def test_triage_card_includes_profit_section(tmp_path):
     est = ProfitEstimate(
         expected_profit_eth=0.42,
@@ -54,6 +67,8 @@ def test_triage_card_includes_profit_section(tmp_path):
     assert "**Pool ETH:** `12.0000`" in text
     assert "**Gate:** `PASS`" in text
     assert "**Method:** `xyk_spot`" in text
+    assert "etherscan.io/address/" in text
+    assert "basescan.org" not in text
 
 
 def test_triage_card_profit_from_exploit_payload(tmp_path):

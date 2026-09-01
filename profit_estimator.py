@@ -120,7 +120,8 @@ def apply_profit_gate(
     eth_balance: float,
     pool_eth: float = 0.0,
     pool_token: float = 0.0,
-    treasury_token: float = 0.0,
+    treasury_token_raw: int = 0,
+    token_decimals: int = 18,
     sell_fraction: float = DEFAULT_SELL_FRACTION,
     enabled: bool = True,
     gas_eth: float = DEFAULT_GAS_ETH,
@@ -128,6 +129,7 @@ def apply_profit_gate(
 ) -> Tuple[List[Dict[str, Any]], List[str], Optional[ProfitEstimate]]:
     """Filter confirmed exploits that cannot pay net of gas.
 
+    ``treasury_token_raw`` is the ERC-20 ``balanceOf`` in base units (wei-scale).
     Returns (kept_exploits, status_notes, last_estimate).
     """
     if not enabled:
@@ -136,7 +138,10 @@ def apply_profit_gate(
     kept: List[Dict[str, Any]] = []
     notes: List[str] = []
     last: Optional[ProfitEstimate] = None
-    sell = treasury_token * sell_fraction if treasury_token else 0.0
+    scale = 10 ** int(token_decimals)
+    raw = int(treasury_token_raw or 0)
+    whole_tokens = raw / scale if raw else 0.0
+    sell = whole_tokens * sell_fraction if whole_tokens else 0.0
 
     for exp in confirmed:
         vtype = exp.get("type") or ""
@@ -144,11 +149,11 @@ def apply_profit_gate(
             last = estimate_swapback_sandwich_profit(
                 pool_eth=pool_eth,
                 pool_token=pool_token,
-                sell_token=sell or treasury_token,
+                sell_token=sell or whole_tokens,
                 gas_eth=gas_eth,
                 min_net_profit_eth=min_net_profit_eth,
                 sell_fraction=sell_fraction,
-                treasury_token_raw=int(treasury_token) if treasury_token else 0,
+                treasury_token_raw=raw,
             )
             if last.actionable:
                 kept.append(exp)
