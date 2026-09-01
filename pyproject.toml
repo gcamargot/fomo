@@ -26,6 +26,7 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+exclude = ["Exploits/lib", "node_modules", "venv", ".venv", "contracts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W"]
