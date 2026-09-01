@@ -16,6 +16,7 @@ class StateSnapshot:
     pool_eth: float = 0.0
     treasury_tokens: float = 0.0
     swap_enabled: Optional[bool] = None
+    erc20_treasury_eth: float = 0.0
 
 
 def snapshot_to_dict(snap: StateSnapshot) -> Dict[str, Any]:
@@ -37,6 +38,7 @@ def snapshot_from_dict(data: Optional[Dict[str, Any]]) -> Optional[StateSnapshot
             pool_eth=float(data.get("pool_eth") or 0.0),
             treasury_tokens=float(data.get("treasury_tokens") or 0.0),
             swap_enabled=se,
+            erc20_treasury_eth=float(data.get("erc20_treasury_eth") or 0.0),
         )
     except (TypeError, ValueError):
         return None
@@ -58,6 +60,8 @@ def should_wakeup(
     if abs(curr.pool_eth - prev.pool_eth) >= min_pool_delta:
         return True
     if abs(curr.treasury_tokens - prev.treasury_tokens) >= min_treasury_delta:
+        return True
+    if abs(curr.erc20_treasury_eth - prev.erc20_treasury_eth) >= min_eth_delta:
         return True
     if curr.swap_enabled is not None and curr.swap_enabled != prev.swap_enabled:
         return True

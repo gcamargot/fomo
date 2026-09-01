@@ -333,6 +333,12 @@ class TokenScannerDB:
                                 )
                             except Exception:
                                 pass
+                    cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS sync_cursors (
+                        key TEXT PRIMARY KEY,
+                        block_number INTEGER NOT NULL
+                    )
+                    """)
                     conn.commit()
                     # Ensure WAL is durable on the DB file itself.
                     mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()
@@ -420,6 +426,31 @@ class TokenScannerDB:
 
         db_execute_with_retry(_op)
 
+    def get_cursor(self, key: str, default: int = 0) -> int:
+        def _op():
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT block_number FROM sync_cursors WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                return int(row[0]) if row else int(default)
+
+        return int(db_execute_with_retry(_op))
+
+    def set_cursor(self, key: str, block_number: int) -> None:
+        def _op():
+            with self.get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO sync_cursors (key, block_number) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET block_number = excluded.block_number
+                    """,
+                    (key, int(block_number)),
+                )
+                conn.commit()
+
+        db_execute_with_retry(_op)
+
     def ensure_token_row(
         self,
         *,
@@ -429,8 +460,9 @@ class TokenScannerDB:
         compiler: str = "Unknown",
         category: str = "CUSTOM_LOGIC",
         timestamp: Optional[str] = None,
+        verified: bool = True,
     ) -> None:
-        """Insert a verified row if missing (disk ingest). Does not overwrite scans."""
+        """Insert a row if missing (disk ingest / factory). Does not overwrite scans."""
         ts = timestamp or datetime.now(timezone.utc).isoformat()
         addr = address.lower()
 
@@ -441,9 +473,9 @@ class TokenScannerDB:
                     INSERT OR IGNORE INTO tokens (
                         address, name, chain, compiler, category, verified,
                         first_seen_timestamp
-                    ) VALUES (?, ?, ?, ?, ?, 1, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (addr, name, chain, compiler, category, ts),
+                    (addr, name, chain, compiler, category, 1 if verified else 0, ts),
                 )
                 conn.commit()
 

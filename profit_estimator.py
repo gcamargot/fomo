@@ -86,17 +86,20 @@ def estimate_swapback_sandwich_profit(
 def estimate_native_drain_profit(
     eth_balance: float,
     *,
+    erc20_eth_equiv: float = 0.0,
     gas_eth: float = DEFAULT_GAS_ETH,
     min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
 ) -> ProfitEstimate:
-    net = max(0.0, float(eth_balance or 0.0) - gas_eth)
+    gross = float(eth_balance or 0.0) + float(erc20_eth_equiv or 0.0)
+    net = max(0.0, gross - gas_eth)
+    method = "native_plus_erc20" if erc20_eth_equiv else "native_balance"
     return ProfitEstimate(
         expected_profit_eth=net,
         pool_eth=0.0,
         treasury_token_raw=0,
         sell_fraction=0.0,
         gas_eth=gas_eth,
-        method="native_balance",
+        method=method,
         actionable=net >= min_net_profit_eth,
     )
 
@@ -122,6 +125,7 @@ def apply_profit_gate(
     pool_token: float = 0.0,
     treasury_token_raw: int = 0,
     token_decimals: int = 18,
+    erc20_eth_equiv: float = 0.0,
     sell_fraction: float = DEFAULT_SELL_FRACTION,
     enabled: bool = True,
     gas_eth: float = DEFAULT_GAS_ETH,
@@ -164,6 +168,7 @@ def apply_profit_gate(
         elif vtype in NATIVE_DRAIN_TYPES:
             last = estimate_native_drain_profit(
                 eth_balance,
+                erc20_eth_equiv=erc20_eth_equiv,
                 gas_eth=gas_eth,
                 min_net_profit_eth=min_net_profit_eth,
             )
@@ -176,6 +181,7 @@ def apply_profit_gate(
         else:
             last = estimate_native_drain_profit(
                 eth_balance,
+                erc20_eth_equiv=erc20_eth_equiv,
                 gas_eth=gas_eth,
                 min_net_profit_eth=min_net_profit_eth,
             )

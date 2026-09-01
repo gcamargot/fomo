@@ -35,6 +35,13 @@ def test_init_db_adds_watchlist_columns():
             ).fetchone()
         assert row is not None
         assert abs(float(row[0]) - 0.42) < 1e-9
+        tables = {r[0] for r in db.get_connection().execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        assert "sync_cursors" in tables
+        db.set_cursor("base:univ2:PairCreated", 123)
+        assert db.get_cursor("base:univ2:PairCreated") == 123
+        assert db.get_cursor("missing", default=7) == 7
     finally:
         os.unlink(path)
         for extra in (path + "-wal", path + "-shm"):
