@@ -2001,6 +2001,8 @@ class MultiChainScannerDaemon:
                 self.running = False
 
 def display_db_stats(as_json: bool = False):
+    from pipeline_stats import collect_pipeline_stats
+
     if not os.path.exists(DB_PATH):
         if as_json:
             print(json.dumps({"error": "No database found", "total_scanned": 0}))
@@ -2009,193 +2011,84 @@ def display_db_stats(as_json: bool = False):
         return
 
     db_instance = TokenScannerDB(DB_PATH)
-
     with db_lock:
         with db_instance.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM tokens")
-            total = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE verified = 1")
-            verified_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE is_user_exploitable = 1")
-            user_exploitable_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE is_user_exploitable = 1 AND onchain_verified = 1")
-            active_triage_count = cursor.fetchone()[0]
-
-            cursor.execute("""
-            SELECT COUNT(*) FROM tokens
-            WHERE verified = 1 AND is_user_exploitable = 0 AND eth_balance = 0.0 AND (
-                has_unprotected_initializer = 1 OR
-                has_unprotected_critical_function = 1 OR
-                has_reentrancy_flaw = 1 OR
-                has_signature_replay_flaw = 1 OR
-                has_vault_inflation = 1 OR
-                has_flash_staking_flaw = 1 OR
-                has_arbitrary_call = 1 OR
-                has_fee_on_transfer_flaw = 1 OR
-                has_spot_oracle_flaw = 1 OR
-                has_tx_origin_auth = 1 OR
-                has_unprotected_router_setter = 1 OR
-                has_permit_no_nonce = 1 OR
-                has_multicall_msgvalue = 1 OR
-                has_public_swapback = 1
-            )
-            """)
-            dormant_count = cursor.fetchone()[0]
-
-            cursor.execute("""
-            SELECT COUNT(*) FROM tokens
-            WHERE dynamic_status LIKE '%MITIGATED%' OR dynamic_status LIKE '%PROTECTED%' OR dynamic_status LIKE '%SEALED%' OR dynamic_status LIKE '%ISOLATED%' OR dynamic_status LIKE '%FACET%'
-            """)
-            mitigated_count = cursor.fetchone()[0]
-
-            # Metrics counts
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_zero_slippage = 1")
-            slippage_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_unprotected_critical_function = 1")
-            broken_access_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_vault_inflation = 1")
-            vault_inflation_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_fee_on_transfer_flaw = 1")
-            fot_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_flash_staking_flaw = 1")
-            flash_staking_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_arbitrary_call = 1")
-            arb_call_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_reflection_ratio_flaw = 1")
-            reflection_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_reentrancy_flaw = 1")
-            reentrancy_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_unprotected_initializer = 1")
-            initializer_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_spot_oracle_flaw = 1")
-            spot_oracle_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_signature_replay_flaw = 1")
-            sig_replay_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_tx_origin_auth = 1")
-            tx_origin_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_unprotected_router_setter = 1")
-            router_setter_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_permit_no_nonce = 1")
-            permit_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_multicall_msgvalue = 1")
-            multicall_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_public_swapback = 1")
-            public_swapback_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_conditional_honeypot = 1")
-            honeypot_count = cursor.fetchone()[0]
-
-            cursor.execute("SELECT COUNT(*) FROM tokens WHERE has_dynamic_taxes = 1")
-            tax_count = cursor.fetchone()[0]
-
-            # Chain breakdown
-            cursor.execute("SELECT chain, COUNT(*) FROM tokens GROUP BY chain")
-            chain_counts = dict(cursor.fetchall())
-
-    tot_calc = max(1, verified_count)
-
-    pending_cards = []
-    if os.path.exists(TRIAGE_DIR):
-        pending_cards = [os.path.abspath(os.path.join(TRIAGE_DIR, f)) for f in os.listdir(TRIAGE_DIR) if f.endswith(".md")]
+            stats = collect_pipeline_stats(conn, triage_dir=TRIAGE_DIR)
 
     if as_json:
-        stats_payload = {
-            "total_scanned": total,
-            "verified_contracts": verified_count,
-            "chains_breakdown": chain_counts,
-            "triage_lifecycle": {
-                "active_triage_queue_count": len(pending_cards),
-                "dormant_monitored_count": dormant_count,
-                "mitigated_false_positives_count": mitigated_count,
-                "owner_centralization_risks_count": tax_count + honeypot_count
-            },
-            "user_exploitable_count": user_exploitable_count,
-            "onchain_confirmed_count": active_triage_count,
-            "user_exploitable_percentage": round((user_exploitable_count / tot_calc) * 100, 2),
-            "metrics": {
-                "zero_slippage_liquidation": {"count": slippage_count, "prevalence_percent": round((slippage_count / tot_calc) * 100, 2)},
-                "broken_access_control": {"count": broken_access_count, "prevalence_percent": round((broken_access_count / tot_calc) * 100, 2)},
-                "erc4626_vault_inflation": {"count": vault_inflation_count, "prevalence_percent": round((vault_inflation_count / tot_calc) * 100, 2)},
-                "fee_on_transfer_flaw": {"count": fot_count, "prevalence_percent": round((fot_count / tot_calc) * 100, 2)},
-                "flash_staking_flaw": {"count": flash_staking_count, "prevalence_percent": round((flash_staking_count / tot_calc) * 100, 2)},
-                "arbitrary_external_call": {"count": arb_call_count, "prevalence_percent": round((arb_call_count / tot_calc) * 100, 2)},
-                "reflection_ratio_flaw": {"count": reflection_count, "prevalence_percent": round((reflection_count / tot_calc) * 100, 2)},
-                "checks_effects_reentrancy": {"count": reentrancy_count, "prevalence_percent": round((reentrancy_count / tot_calc) * 100, 2)},
-                "unprotected_proxy_initializer": {"count": initializer_count, "prevalence_percent": round((initializer_count / tot_calc) * 100, 2)},
-                "spot_oracle_manipulation": {"count": spot_oracle_count, "prevalence_percent": round((spot_oracle_count / tot_calc) * 100, 2)},
-                "signature_replay_flaw": {"count": sig_replay_count, "prevalence_percent": round((sig_replay_count / tot_calc) * 100, 2)},
-                "tx_origin_auth": {"count": tx_origin_count, "prevalence_percent": round((tx_origin_count / tot_calc) * 100, 2)},
-                "unprotected_router_setter": {"count": router_setter_count, "prevalence_percent": round((router_setter_count / tot_calc) * 100, 2)},
-                "permit_no_nonce": {"count": permit_count, "prevalence_percent": round((permit_count / tot_calc) * 100, 2)},
-                "multicall_msgvalue_reuse": {"count": multicall_count, "prevalence_percent": round((multicall_count / tot_calc) * 100, 2)},
-                "public_swapback_trigger": {"count": public_swapback_count, "prevalence_percent": round((public_swapback_count / tot_calc) * 100, 2)},
-                "conditional_honeypot": {"count": honeypot_count, "prevalence_percent": round((honeypot_count / tot_calc) * 100, 2)},
-                "dynamic_taxes": {"count": tax_count, "prevalence_percent": round((tax_count / tot_calc) * 100, 2)}
-            },
-            "pending_triage_cards_count": len(pending_cards),
-            "triage_queue_files": pending_cards
-        }
-        print(json.dumps(stats_payload, indent=2))
+        print(json.dumps(stats, indent=2))
         return
 
-    table = Table(title="Multi-Chain Security Dataset & Empirical Triage Summary")
-    table.add_column("Triage Category / Metric", style="yellow")
+    corpus = stats["corpus"]
+    hits = stats["hits"]
+    watch = stats["watchlist"]
+    factory = stats["factory"]
+    inv = stats["inventory"]
+
+    table = Table(title="FOMO profit pipeline")
+    table.add_column("Bucket", style="yellow")
     table.add_column("Count", style="red bold", justify="right")
-    table.add_column("Prevalence (%)", style="cyan", justify="right")
-
-    table.add_row("Total Scanned Contracts (All Chains)", str(total), "100.0%")
-    table.add_row("Verified Source Code Contracts", str(verified_count), f"{(verified_count/max(1,total))*100:.1f}%")
-    table.add_row("🚨 ACTIVE TRIAGE QUEUE (Actionable)", str(len(pending_cards)), f"{(len(pending_cards)/tot_calc)*100:.1f}%")
-    table.add_row("💤 DORMANT VULNERABILITIES (Monitored 0 ETH)", str(dormant_count), f"{(dormant_count/tot_calc)*100:.1f}%")
-    table.add_row("🛡️ MITIGATED / PROTECTED (Filtered FPs)", str(mitigated_count), f"{(mitigated_count/tot_calc)*100:.1f}%")
-    table.add_row("👑 OWNER-CENTRALIZATION (Taxes/Honeypots)", str(tax_count + honeypot_count), f"{((tax_count+honeypot_count)/tot_calc)*100:.1f}%")
-    table.add_row("• Checks-Effects Reentrancy (ETH Drain)", str(reentrancy_count), f"{(reentrancy_count/tot_calc)*100:.1f}%")
-    table.add_row("• Unprotected Proxy Initializer Hijack", str(initializer_count), f"{(initializer_count/tot_calc)*100:.1f}%")
-    table.add_row("• Spot AMM Oracle Dependence", str(spot_oracle_count), f"{(spot_oracle_count/tot_calc)*100:.1f}%")
-    table.add_row("• Signature Replay / Nonce-less Verification", str(sig_replay_count), f"{(sig_replay_count/tot_calc)*100:.1f}%")
-    table.add_row("• tx.origin Authentication", str(tx_origin_count), f"{(tx_origin_count/tot_calc)*100:.1f}%")
-    table.add_row("• Unprotected setRouter/setPair", str(router_setter_count), f"{(router_setter_count/tot_calc)*100:.1f}%")
-    table.add_row("• permit() without nonce", str(permit_count), f"{(permit_count/tot_calc)*100:.1f}%")
-    table.add_row("• multicall msg.value reuse", str(multicall_count), f"{(multicall_count/tot_calc)*100:.1f}%")
-    table.add_row("• Public swapBack trigger", str(public_swapback_count), f"{(public_swapback_count/tot_calc)*100:.1f}%")
-    table.add_row("• Broken Access Control on Financial Funcs", str(broken_access_count), f"{(broken_access_count/tot_calc)*100:.1f}%")
-    table.add_row("• ERC-4626 Vault Inflation Attack", str(vault_inflation_count), f"{(vault_inflation_count/tot_calc)*100:.1f}%")
-    table.add_row("• Fee-on-Transfer Invariant Flaw", str(fot_count), f"{(fot_count/tot_calc)*100:.1f}%")
-    table.add_row("• Flash-Staking Instant Reward Drain", str(flash_staking_count), f"{(flash_staking_count/tot_calc)*100:.1f}%")
-    table.add_row("• Unconstrained Arbitrary Call (`.call()`)", str(arb_call_count), f"{(arb_call_count/tot_calc)*100:.1f}%")
-    table.add_row("• Reflection / Rebase Ratio Flaw", str(reflection_count), f"{(reflection_count/tot_calc)*100:.1f}%")
-    table.add_row("• Conditional Honeypot / Whitelists (Owner)", str(honeypot_count), f"{(honeypot_count/tot_calc)*100:.1f}%")
-    table.add_row("• Dynamic Fee / Tax Manipulations (Owner)", str(tax_count), f"{(tax_count/tot_calc)*100:.1f}%")
-
+    table.add_column("Notes", style="cyan")
+    table.add_row("Scanned", str(corpus["total"]), "all chains")
+    table.add_row("Verified source", str(corpus["verified"]), "")
+    table.add_row(
+        "Hits pending review",
+        str(hits["pending_review"]),
+        f"cards in {TRIAGE_DIR}",
+    )
+    table.add_row("Hits confirmed (DB)", str(hits["confirmed"]), "exploitable + on-chain")
+    table.add_row(
+        "Profit PASS",
+        str(hits["profit_pass"]),
+        f">= {hits['min_profit_eth']} ETH expected",
+    )
+    table.add_row("Near-miss", str(watch["near_miss"]), "profit > 0 but below gate")
+    table.add_row("Sleeping tax", str(watch["sleeping_tax"]), "swapBack / zero-slippage")
+    table.add_row("Unfunded drain", str(watch["unfunded_drain"]), "callable drain, no payoff yet")
+    table.add_row(
+        "Factory new pairs",
+        str(factory["total"]),
+        f"no_source={factory['no_source']} dust={factory['dust']} actionable={factory['actionable']}",
+    )
+    table.add_row(
+        "Inventory",
+        f"{inv['public_swapback']} / {inv['zero_slippage']}",
+        "public swapBack / zero-slippage flags",
+    )
     console.print(table)
 
-    if chain_counts:
-        ch_table = Table(title="Scanned Contracts by Blockchain")
-        ch_table.add_column("Blockchain", style="green bold")
+    chains = corpus.get("by_chain") or {}
+    if chains:
+        ch_table = Table(title="Corpus by chain")
+        ch_table.add_column("Chain", style="green bold")
         ch_table.add_column("Contracts", style="white", justify="right")
-        for ch, cnt in chain_counts.items():
-            ch_table.add_row(ch.upper(), str(cnt))
+        for ch, cnt in sorted(chains.items(), key=lambda kv: (-kv[1], str(kv[0]))):
+            ch_table.add_row(str(ch).upper(), str(cnt))
         console.print(ch_table)
 
-    if pending_cards:
-        console.print(f"\n[bold magenta]📁 Pending Triage Cards for Researcher Review ({len(pending_cards)}):[/]")
-        for c in pending_cards:
-            console.print(f"  • [cyan]{c}[/]")
+    top = stats.get("top_expected_profit") or []
+    if top:
+        top_table = Table(title="Top expected profit (ETH)")
+        top_table.add_column("Address")
+        top_table.add_column("Chain")
+        top_table.add_column("ETH", justify="right")
+        top_table.add_column("Status")
+        for row in top:
+            top_table.add_row(
+                str(row.get("address") or ""),
+                str(row.get("chain") or ""),
+                f"{float(row.get('expected_profit_eth') or 0):.4f}",
+                str(row.get("dynamic_status") or "")[:48],
+            )
+        console.print(top_table)
+
+    queue = hits.get("queue") or []
+    if queue:
+        console.print(f"\n[bold magenta]Pending review ({len(queue)}):[/]")
+        for q in queue:
+            profit = q.get("expected_profit_eth")
+            extra = f"  profit={profit:.4f} ETH" if isinstance(profit, (int, float)) else ""
+            console.print(f"  • [cyan]{q.get('path')}[/]{extra}")
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-Chain Token Security Scanner with Deep Dynamic On-Chain Verification")

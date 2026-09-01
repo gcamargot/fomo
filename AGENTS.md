@@ -27,46 +27,41 @@ python3 token_scanner_daemon.py --scan-address 0xAC1Bd2486aAf3B5C0fc3Fd868558b08
 
 ---
 
-## 📊 2. How to Query Stats Programmatically (JSON API)
+## 📊 2. Pipeline dashboard (`--stats`)
 
-Agents should query the database stats using the `--stats --json` flag for easy, deterministic parsing:
+`--stats` is the live profit-pipeline snapshot (not detector prevalence).
 
 ```bash
 python3 token_scanner_daemon.py --stats --json
+python3 token_scanner_daemon.py --stats
 ```
 
-### JSON Schema Output:
+JSON (nested dashboard is canonical; a few aliases remain for old callers):
+
 ```json
 {
-  "total_scanned": 25,
-  "verified_contracts": 20,
-  "user_exploitable_count": 5,
-  "user_exploitable_percentage": 25.0,
-  "metrics": {
-    "zero_slippage_liquidation": {
-      "count": 5,
-      "prevalence_percent": 25.0
-    },
-    "conditional_honeypot": {
-      "count": 8,
-      "prevalence_percent": 40.0
-    },
-    "dynamic_taxes": {
-      "count": 12,
-      "prevalence_percent": 60.0
-    }
+  "corpus": {"total": 8990, "verified": 7988, "by_chain": {"base": 839}},
+  "hits": {
+    "pending_review": 1,
+    "confirmed": 1,
+    "profit_pass": 1,
+    "min_profit_eth": 0.05,
+    "queue": [{"path": ".../triage_base_0xabc.md", "address": "0xabc", "chain": "base", "expected_profit_eth": 0.4}]
   },
-  "pending_triage_cards_count": 5,
-  "triage_queue_files": [
-    "/home/nahtao97/fomo/contracts/triage_queue/triage_base_0xac1bd2486aaf3b5c0fc3fd868558b082a531b2b4.md"
-  ]
+  "watchlist": {"near_miss": 3, "sleeping_tax": 40, "unfunded_drain": 12},
+  "factory": {"no_source": 4, "dust": 1, "actionable": 0, "total": 5},
+  "inventory": {"public_swapback": 20, "zero_slippage": 2},
+  "top_expected_profit": []
 }
 ```
 
-*For human-readable Rich table output, omit `--json`:*
-```bash
-python3 token_scanner_daemon.py --stats
-```
+How to read it:
+
+- **hits.pending_review** — `.md` cards still in `contracts/triage_queue/` (review these).
+- **hits.profit_pass** — rows with `expected_profit_eth >= 0.05`.
+- **watchlist** — not yet actionable (near-miss / sleeping swapBack / unfunded drain).
+- **factory** — new WETH pairs from `PairCreated` (source vs dust vs estimate PASS).
+- Owner-centralization and per-detector prevalence are **not** in `--stats`. Use `dataset_metrics.py` for the academic corpus.
 
 ---
 
