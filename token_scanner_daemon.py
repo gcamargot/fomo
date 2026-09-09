@@ -170,6 +170,15 @@ SAFE_HINTS = (
     "approvedHashes", "signedMessages", "checkNSignatures", "GS025", "GS026",
     "GnosisSafe", "SafeProxy", "function nonce(",
 )
+# Replay is mitigated if any of these appear (OZ ECDSA, EIP-712, consumed nonce maps).
+SIG_REPLAY_MITIGATED = (
+    "nonces[", "_useNonce", "usedSignatures", "function nonce(",
+    "usedHashes", "usedNonces", "released[", "alreadyUsed",
+    "DOMAIN_SEPARATOR", "EIP712", "TYPEHASH", "typehash",
+    "RecoverError", "MessageHashUtils", "secp256k1n",
+    "toEthSignedMessageHash", "LibDiamond", "facetAddress",
+    "enum RecoverError",
+)
 LENDING_HINTS = ("borrow", "collateral", "liquida", "healthFactor", "ltv", "debtShares")
 
 # Reliable Public RPC Fallbacks per Chain
@@ -888,7 +897,11 @@ class OnChainStateVerifier:
                     status_notes.append("INITIALIZE_OPEN_BUT_UNFUNDED")
 
             elif vtype == "SIGNATURE_REPLAY_FLAW":
-                if any(h in source_text for h in SAFE_HINTS) or "sequenceId" in source_text:
+                if (
+                    any(h in source_text for h in SAFE_HINTS)
+                    or any(h in source_text for h in SIG_REPLAY_MITIGATED)
+                    or "sequenceId" in source_text
+                ):
                     status_notes.append("SIGNATURE_REPLAY_SAFE_OR_SEQUENCE_MITIGATED")
                 elif eth_balance > 0.01:
                     exp["onchain_evidence"] = f"Funded contract ({eth_balance:.4f} ETH) with un-nonce'd ecrecover"
@@ -1461,13 +1474,11 @@ class StaticVulnerabilityAuditor:
         # 14. Signature Replay / Nonce-less Verification
         sig_match = re.search(r"ecrecover\s*\([^)]*\)", source_text)
         looks_like_safe = any(h in source_text for h in SAFE_HINTS)
+        replay_mitigated = any(h in source_text for h in SIG_REPLAY_MITIGATED)
         if (
             sig_match
             and not looks_like_safe
-            and "nonces[" not in source_text
-            and "_useNonce" not in source_text
-            and "usedSignatures" not in source_text
-            and "function nonce(" not in source_text
+            and not replay_mitigated
         ):
             findings["has_signature_replay_flaw"] = True
             snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, sig_match.start())
@@ -1582,11 +1593,20 @@ class StaticVulnerabilityAuditor:
                     "snippet": snippet,
                 })
 
-        # 19. Public swapBack / swapAndLiquify trigger
+        # 19. Public swapBack / swapAndLiquify / manualSwap trigger
         pub_swap = re.search(
-            r"function\s+(swapBack|swapAndLiquify)\s*\([^)]*\)\s*(?:public|external)",
+            r"function\s+(swapBack|swapAndLiquify|manualSwap)\s*\([^)]*\)\s*(?:public|external)",
             source_text,
         )
+        if pub_swap and StaticVulnerabilityAuditor._header_lacks_auth(source_text, pub_swap):
+            chunk = source_text[pub_swap.start(): pub_swap.start() + 600]
+            tax_gated = re.search(
+                r"_taxWallet|_marketingWallet|taxWallet|marketingWallet|"
+                r"msg\.sender\s*==\s*[_a-zA-Z].*(?:[Ww]allet|[Oo]wner)",
+                chunk,
+            )
+            if tax_gated:
+                pub_swap = None
         if pub_swap and StaticVulnerabilityAuditor._header_lacks_auth(source_text, pub_swap):
             findings["has_public_swapback"] = True
             snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, pub_swap.start())

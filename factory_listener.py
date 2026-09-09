@@ -224,11 +224,13 @@ def process_factory_pair(
     else:
         from profit_estimator import profit_to_dict
         profit_payload = profit_to_dict(est)
-        status = (
-            "FACTORY_NEW_PAIR_ACTIONABLE"
-            if est.actionable
-            else "FACTORY_NEW_PAIR_DUST"
-        )
+        # XYK on a tax bucket without source/trigger is not a user-exploitable hit.
+        if not src:
+            status = "FACTORY_NEW_PAIR_NO_SOURCE"
+        elif est.actionable:
+            status = "FACTORY_NEW_PAIR_NO_EXPLOIT"
+        else:
+            status = "FACTORY_NEW_PAIR_DUST"
 
     emit = False
     if src and user_exploits:
@@ -257,11 +259,6 @@ def process_factory_pair(
     pair = str(ev.get("pair") or "").lower() or None
     fields: Dict[str, Any] = {
         "dynamic_status": status,
-        "expected_profit_eth": (
-            (profit_payload or {}).get("expected_profit_eth")
-            if profit_payload
-            else est.expected_profit_eth
-        ),
         "state_snapshot": json.dumps(
             snapshot_to_dict(
                 StateSnapshot(
@@ -272,6 +269,12 @@ def process_factory_pair(
             )
         ),
     }
+    if src and user_exploits:
+        fields["expected_profit_eth"] = (
+            (profit_payload or {}).get("expected_profit_eth")
+            if profit_payload
+            else est.expected_profit_eth
+        )
     if src:
         fields["verified"] = 1
     for col in _AUDIT_FLAG_COLS:
