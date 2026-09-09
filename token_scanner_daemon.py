@@ -786,6 +786,59 @@ class OnChainStateVerifier:
             return None
 
     @staticmethod
+    def pair_skim_exploit(
+        w3,
+        chain: str,
+        token: str,
+        pair_hint: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """If a V2 WETH pair holds excess above reserves, skim is a public drain."""
+        from factory_listener import erc20_balance_raw
+        from profit_estimator import estimate_skim_profit, profit_to_dict
+
+        cfg = DEX_CONFIG.get((chain or "").lower())
+        if not w3 or not cfg:
+            return None
+        weth = cfg["weth"]
+        pair = pair_hint
+        amm = {}
+        if not pair:
+            amm = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, token)
+            pair = (amm.get("primary_pool") or {}).get("pair")
+        if not pair:
+            return None
+        if not amm:
+            amm = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, token)
+        res_eth = float(amm.get("eth_reserve") or 0.0)
+        res_tok = float(amm.get("token_reserve") or 0.0)
+        pair_eth = erc20_balance_raw(w3, weth, pair) / 1e18
+        pair_tok = erc20_balance_raw(w3, token, pair) / 1e18
+        est = estimate_skim_profit(
+            pair_eth=pair_eth,
+            pair_token=pair_tok,
+            reserve_eth=res_eth,
+            reserve_token=res_tok,
+        )
+        if not est.actionable:
+            return None
+        payload = profit_to_dict(est)
+        return {
+            "type": "PAIR_SKIM",
+            "user_exploitable": True,
+            "severity": "HIGH",
+            "title": "UniV2 skim of excess pair balances",
+            "exploiter": "Cualquier EOA (pair.skim(to))",
+            "victim": "WETH/token donado o leftover FoT en el par",
+            "payoff": "Extraer balance - getReserves y vender el token.",
+            "snippet": "function skim(address to) external;",
+            "onchain_evidence": (
+                f"pair={pair} excess_eth={pair_eth - res_eth:.4f} "
+                f"excess_token={pair_tok - res_tok:.4f} profit={est.expected_profit_eth:.4f}"
+            ),
+            "profit": payload,
+        }
+
+    @staticmethod
     def verify_onchain_liveness(address: str, chain: str, static_exploits: List[Dict], source_text: str) -> Tuple[bool, str, float, List[Dict], Optional[Dict]]:
         """
         Deep dynamic evaluation of static findings against on-chain state.
@@ -1053,6 +1106,19 @@ class OnChainStateVerifier:
                     confirmed_exploits.append(exp)
                     status_notes.append("MULTICALL_MSGVALUE_FUNDED")
 
+            elif vtype == "V3_COLLECT_UNPROTECTED":
+                probe = OnChainStateVerifier.probe_unauth_selector(w3, address, "collect()")
+                if probe == "auth":
+                    status_notes.append("V3_COLLECT_AUTH_REVERTED")
+                elif eth_balance < 0.01 and probe != "success":
+                    status_notes.append("V3_COLLECT_UNFUNDED")
+                else:
+                    exp["onchain_evidence"] = (
+                        f"Ungated collect() probe={probe}; native={eth_balance:.4f} ETH"
+                    )
+                    confirmed_exploits.append(exp)
+                    status_notes.append("V3_COLLECT_CALLABLE")
+
             elif vtype == "PUBLIC_SWAPBACK_TRIGGER":
                 live = OnChainStateVerifier.evaluate_swapback_liveness(w3, address, source_text)
                 amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, address)
@@ -1088,6 +1154,12 @@ class OnChainStateVerifier:
             else:
                 status_notes.append(f"{vtype}_NO_DYNAMIC_GATE")
 
+        skim_exp = None
+        try:
+            skim_exp = OnChainStateVerifier.pair_skim_exploit(w3, chain, address)
+        except Exception:
+            skim_exp = None
+
         if confirmed_exploits:
             if profit_gate_enabled():
                 amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
@@ -1116,6 +1188,14 @@ class OnChainStateVerifier:
                         exp["profit"] = payload
                 confirmed_exploits = kept
                 profit_payload = payload
+
+        if skim_exp:
+            confirmed_exploits.append(skim_exp)
+            status_notes.append("PAIR_SKIM_ACTIONABLE")
+            sp = skim_exp.get("profit") or {}
+            cur = float((profit_payload or {}).get("expected_profit_eth") or 0.0)
+            if float(sp.get("expected_profit_eth") or 0.0) >= cur:
+                profit_payload = sp
 
         is_active = len(confirmed_exploits) > 0
         final_status = " | ".join(status_notes) if status_notes else "STATIC_ONLY"
@@ -1592,6 +1672,30 @@ class StaticVulnerabilityAuditor:
                     "payoff": "Contabilizar el mismo ETH varias veces y extraer valor.",
                     "snippet": snippet,
                 })
+
+        # 18b. Unprotected Uniswap V3 collect (fees to caller)
+        collect_m = re.search(
+            r"function\s+collect(?:Protocol)?\s*\([^)]*\)\s*(?:public|external)",
+            source_text,
+        )
+        if (
+            collect_m
+            and "{" in source_text[collect_m.start(): collect_m.start() + 250]
+            and StaticVulnerabilityAuditor._header_lacks_auth(source_text, collect_m)
+            and "interface " not in source_text[max(0, collect_m.start() - 80): collect_m.start()]
+        ):
+            findings["has_unprotected_critical_function"] = True
+            snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, collect_m.start())
+            evidence_list.append({
+                "type": "V3_COLLECT_UNPROTECTED",
+                "user_exploitable": True,
+                "title": "collect() de fees V3 sin control de acceso",
+                "severity": "HIGH",
+                "exploiter": "Cualquier Usuario / Bot",
+                "victim": "Fees de una posición Uniswap V3",
+                "payoff": "Cobrar tokensOwed / protocol fees a msg.sender.",
+                "snippet": snippet,
+            })
 
         # 19. Public swapBack / swapAndLiquify / manualSwap trigger
         pub_swap = re.search(

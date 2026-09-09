@@ -5,7 +5,10 @@ from profit_estimator import (
     MIN_POOL_ETH,
     ProfitEstimate,
     apply_profit_gate,
+    estimate_attacker_sandwich_profit,
+    estimate_collect_profit,
     estimate_native_drain_profit,
+    estimate_skim_profit,
     estimate_swapback_sandwich_profit,
     xyk_amount_out,
 )
@@ -105,9 +108,10 @@ def test_profit_gate_keeps_profitable_swapback():
     kept, notes, est = apply_profit_gate(
         confirmed,
         eth_balance=0.0,
-        pool_eth=25.0,
-        pool_token=500_000.0,
+        pool_eth=50.0,
+        pool_token=1_000_000.0,
         treasury_token_raw=80_000 * 10**18,
+        sell_fraction=1.0,
         enabled=True,
     )
     assert len(kept) == 1
@@ -129,6 +133,82 @@ def test_profit_gate_disabled_passthrough():
     assert kept == confirmed
     assert notes == []
     assert est is None
+
+
+def test_skim_excess_weth_is_actionable():
+    est = estimate_skim_profit(
+        pair_eth=1.2,
+        pair_token=1000.0,
+        reserve_eth=1.0,
+        reserve_token=1000.0,
+    )
+    assert est.method == "pair_skim"
+    assert est.actionable is True
+    assert abs(est.expected_profit_eth - (0.2 - 0.002)) < 1e-9
+
+
+def test_skim_dust_excess_not_actionable():
+    est = estimate_skim_profit(
+        pair_eth=1.001,
+        pair_token=1000.0,
+        reserve_eth=1.0,
+        reserve_token=1000.0,
+    )
+    assert est.actionable is False
+
+
+def test_collect_owed_weth_actionable():
+    est = estimate_collect_profit(owed_weth=0.2, owed_token=0.0)
+    assert est.method == "v3_collect"
+    assert est.actionable is True
+
+
+def test_sandwich_fat_dump_is_actionable():
+    est = estimate_attacker_sandwich_profit(
+        pool_eth=50.0,
+        pool_token=1_000_000.0,
+        victim_token=80_000.0,
+    )
+    assert est.method == "sandwich_xyk"
+    assert est.actionable is True
+    assert est.expected_profit_eth >= MIN_NET_PROFIT_ETH
+
+
+def test_sandwich_dust_dump_not_actionable():
+    est = estimate_attacker_sandwich_profit(
+        pool_eth=0.2,
+        pool_token=10_000.0,
+        victim_token=10.0,
+    )
+    assert est.actionable is False
+
+
+def test_profit_gate_keeps_sandwichable_swapback():
+    confirmed = [{"type": "PUBLIC_SWAPBACK_TRIGGER"}]
+    kept, notes, est = apply_profit_gate(
+        confirmed,
+        eth_balance=0.0,
+        pool_eth=50.0,
+        pool_token=1_000_000.0,
+        treasury_token_raw=80_000 * 10**18,
+        sell_fraction=1.0,
+        enabled=True,
+    )
+    assert len(kept) == 1
+    assert est is not None and est.method == "sandwich_xyk" and est.actionable
+
+
+def test_profit_gate_collect_uses_owed_native():
+    confirmed = [{"type": "V3_COLLECT_UNPROTECTED"}]
+    kept, _notes, est = apply_profit_gate(
+        confirmed,
+        eth_balance=0.2,
+        pool_eth=10.0,
+        pool_token=10_000.0,
+        treasury_token_raw=0,
+    )
+    assert len(kept) == 1
+    assert est is not None and est.method == "v3_collect"
 
 
 def test_profit_gate_enabled_env(monkeypatch):

@@ -94,6 +94,29 @@ def test_verified_swapback_fat_pool_emits_triage():
     assert EV["pair"] in flags["state_snapshot"]
 
 
+def test_skim_excess_weth_emits_without_source():
+    db = MagicMock()
+    gen = MagicMock(return_value="/tmp/skim.md")
+    process_factory_pair(
+        db,
+        "base",
+        EV,
+        load_source=lambda *a: "",
+        audit=lambda src: ({}, []),
+        verify=lambda *a: (False, "X", 0.0, [], None),
+        generate_triage=gen,
+        estimate=lambda **k: _est(actionable=False),
+        reserves=lambda: (1.0, 1000.0),
+        treasury_raw=lambda: 0,
+        pair_balances=lambda: (1.25, 1000.0),
+    )
+    gen.assert_called_once()
+    flags = db.update_token_flags.call_args[0][1]
+    assert flags["dynamic_status"] == "PAIR_SKIM_ACTIONABLE"
+    assert flags.get("is_user_exploitable") == 1
+    assert flags.get("expected_profit_eth", 0) >= 0.05
+
+
 def test_fork_run_skipped_when_not_emitting():
     db = MagicMock()
     ran = []

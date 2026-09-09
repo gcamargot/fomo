@@ -73,3 +73,33 @@ def test_manual_swap_tax_wallet_is_not_public_trigger():
     }
     """
     assert "PUBLIC_SWAPBACK_TRIGGER" not in _types(src)
+
+
+def test_public_collect_without_auth_flags():
+    src = """
+    contract Vault {
+        function collect(uint256 tokenId, address recipient, uint128 a0, uint128 a1)
+            external returns (uint256, uint256) {
+            npm.collect(tokenId, recipient, a0, a1);
+        }
+    }
+    """
+    assert "V3_COLLECT_UNPROTECTED" in _types(src)
+
+
+def test_interface_collect_is_ignored():
+    src = """
+    interface INonfungiblePositionManager {
+        function collect(uint256 tokenId) external returns (uint256, uint256);
+    }
+    """
+    assert "V3_COLLECT_UNPROTECTED" not in _types(src)
+
+
+def test_only_owner_collect_is_ignored():
+    src = """
+    function collect() external onlyOwner {
+        payable(owner()).transfer(address(this).balance);
+    }
+    """
+    assert "V3_COLLECT_UNPROTECTED" not in _types(src)
