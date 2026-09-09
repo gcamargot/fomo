@@ -15,6 +15,8 @@ XYK_TYPES = frozenset({
     "ZERO_SLIPPAGE_LIQUIDATION",
     "PUBLIC_SWAPBACK_TRIGGER",
 })
+SKIM_TYPES = frozenset({"PAIR_SKIM"})
+COLLECT_TYPES = frozenset({"V3_COLLECT_UNPROTECTED"})
 NATIVE_DRAIN_TYPES = frozenset({
     "BROKEN_ACCESS_CONTROL",
     "UNPROTECTED_INITIALIZER_HIJACK",
@@ -43,6 +45,17 @@ def xyk_amount_out(amount_in: float, reserve_in: float, reserve_out: float) -> f
     amount_in_with_fee = amount_in * 997.0
     numerator = amount_in_with_fee * reserve_out
     denominator = reserve_in * 1000.0 + amount_in_with_fee
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
+
+
+def xyk_amount_in(amount_out: float, reserve_in: float, reserve_out: float) -> float:
+    """Uniswap V2 getAmountIn with 0.3% fee."""
+    if amount_out <= 0 or reserve_in <= 0 or reserve_out <= 0 or amount_out >= reserve_out:
+        return 0.0
+    numerator = reserve_in * amount_out * 1000.0
+    denominator = (reserve_out - amount_out) * 997.0
     if denominator <= 0:
         return 0.0
     return numerator / denominator
@@ -80,6 +93,129 @@ def estimate_swapback_sandwich_profit(
         gas_eth=gas_eth,
         method="xyk_spot",
         actionable=actionable,
+    )
+
+
+def estimate_skim_profit(
+    *,
+    pair_eth: float,
+    pair_token: float,
+    reserve_eth: float,
+    reserve_token: float,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+) -> ProfitEstimate:
+    """UniV2 skim: excess balance above reserves, then sell leftover tokens."""
+    excess_eth = max(0.0, float(pair_eth or 0.0) - float(reserve_eth or 0.0))
+    excess_token = max(0.0, float(pair_token or 0.0) - float(reserve_token or 0.0))
+    token_eth = 0.0
+    if excess_token > 0 and reserve_token > 0 and reserve_eth > 0:
+        token_eth = xyk_amount_out(excess_token, reserve_token, reserve_eth)
+    gross = excess_eth + token_eth
+    net = max(0.0, gross - gas_eth)
+    return ProfitEstimate(
+        expected_profit_eth=net,
+        pool_eth=float(reserve_eth or 0.0),
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="pair_skim",
+        actionable=net >= min_net_profit_eth,
+    )
+
+
+def estimate_collect_profit(
+    *,
+    owed_weth: float,
+    owed_token: float = 0.0,
+    pool_eth: float = 0.0,
+    pool_token: float = 0.0,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+) -> ProfitEstimate:
+    """V3 collect: fees owed in WETH plus selling owed token into the pool."""
+    token_eth = 0.0
+    if owed_token > 0 and pool_eth > 0 and pool_token > 0:
+        token_eth = xyk_amount_out(owed_token, pool_token, pool_eth)
+    gross = float(owed_weth or 0.0) + token_eth
+    net = max(0.0, gross - gas_eth)
+    return ProfitEstimate(
+        expected_profit_eth=net,
+        pool_eth=float(pool_eth or 0.0),
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="v3_collect",
+        actionable=net >= min_net_profit_eth,
+    )
+
+
+def _sandwich_roundtrip(
+    pool_eth: float,
+    pool_token: float,
+    victim_token: float,
+    front_token: float,
+) -> float:
+    """Gross attacker ETH sandwiching a token→ETH dump (sell tokens, victim dumps, buy back)."""
+    if front_token <= 0 or victim_token <= 0 or pool_eth <= 0 or pool_token <= 0:
+        return 0.0
+    if front_token >= pool_token * 0.45:
+        return 0.0
+    eth_out = xyk_amount_out(front_token, pool_token, pool_eth)
+    if eth_out <= 0 or eth_out >= pool_eth:
+        return 0.0
+    r_tok = pool_token + front_token
+    r_eth = pool_eth - eth_out
+    victim_eth = xyk_amount_out(victim_token, r_tok, r_eth)
+    if victim_eth <= 0 or victim_eth >= r_eth:
+        return 0.0
+    r_tok2 = r_tok + victim_token
+    r_eth2 = r_eth - victim_eth
+    eth_in = xyk_amount_in(front_token, r_eth2, r_tok2)
+    if eth_in <= 0:
+        return 0.0
+    return eth_out - eth_in
+
+
+def estimate_attacker_sandwich_profit(
+    *,
+    pool_eth: float,
+    pool_token: float,
+    victim_token: float,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+    min_pool_eth: float = MIN_POOL_ETH,
+    treasury_token_raw: int = 0,
+    sell_fraction: float = DEFAULT_SELL_FRACTION,
+) -> ProfitEstimate:
+    """Search a front-run size and return net attacker ETH after two swaps."""
+    empty = ProfitEstimate(
+        expected_profit_eth=0.0,
+        pool_eth=float(pool_eth or 0.0),
+        treasury_token_raw=treasury_token_raw,
+        sell_fraction=sell_fraction,
+        gas_eth=gas_eth * 2.0,
+        method="sandwich_xyk",
+        actionable=False,
+    )
+    if pool_eth < min_pool_eth or pool_token <= 0 or victim_token <= 0:
+        return empty
+    best = 0.0
+    two_gas = gas_eth * 2.0
+    for i in range(1, 25):
+        front_tok = pool_token * (i / 50.0)
+        gross = _sandwich_roundtrip(pool_eth, pool_token, victim_token, front_tok)
+        net = gross - two_gas
+        if net > best:
+            best = net
+    return ProfitEstimate(
+        expected_profit_eth=max(0.0, best),
+        pool_eth=pool_eth,
+        treasury_token_raw=treasury_token_raw,
+        sell_fraction=sell_fraction,
+        gas_eth=two_gas,
+        method="sandwich_xyk",
+        actionable=best >= min_net_profit_eth,
     )
 
 
@@ -150,10 +286,10 @@ def apply_profit_gate(
     for exp in confirmed:
         vtype = exp.get("type") or ""
         if vtype in XYK_TYPES:
-            last = estimate_swapback_sandwich_profit(
+            last = estimate_attacker_sandwich_profit(
                 pool_eth=pool_eth,
                 pool_token=pool_token,
-                sell_token=sell or whole_tokens,
+                victim_token=sell or whole_tokens,
                 gas_eth=gas_eth,
                 min_net_profit_eth=min_net_profit_eth,
                 sell_fraction=sell_fraction,
@@ -163,7 +299,38 @@ def apply_profit_gate(
                 kept.append(exp)
             else:
                 notes.append(
-                    f"PROFIT_BELOW_THRESHOLD_XYK_{last.expected_profit_eth:.4f}ETH"
+                    f"PROFIT_BELOW_THRESHOLD_SANDWICH_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in SKIM_TYPES:
+            # eth_balance is treated as excess WETH sitting on the pair (pair - reserve).
+            last = estimate_skim_profit(
+                pair_eth=eth_balance + pool_eth,
+                pair_token=pool_token,
+                reserve_eth=pool_eth,
+                reserve_token=pool_token,
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_SKIM_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in COLLECT_TYPES:
+            last = estimate_collect_profit(
+                owed_weth=eth_balance,
+                owed_token=whole_tokens,
+                pool_eth=pool_eth,
+                pool_token=pool_token,
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_COLLECT_{last.expected_profit_eth:.4f}ETH"
                 )
         elif vtype in NATIVE_DRAIN_TYPES:
             last = estimate_native_drain_profit(

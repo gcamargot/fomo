@@ -170,6 +170,15 @@ SAFE_HINTS = (
     "approvedHashes", "signedMessages", "checkNSignatures", "GS025", "GS026",
     "GnosisSafe", "SafeProxy", "function nonce(",
 )
+# Replay is mitigated if any of these appear (OZ ECDSA, EIP-712, consumed nonce maps).
+SIG_REPLAY_MITIGATED = (
+    "nonces[", "_useNonce", "usedSignatures", "function nonce(",
+    "usedHashes", "usedNonces", "released[", "alreadyUsed",
+    "DOMAIN_SEPARATOR", "EIP712", "TYPEHASH", "typehash",
+    "RecoverError", "MessageHashUtils", "secp256k1n",
+    "toEthSignedMessageHash", "LibDiamond", "facetAddress",
+    "enum RecoverError",
+)
 LENDING_HINTS = ("borrow", "collateral", "liquida", "healthFactor", "ltv", "debtShares")
 
 # Reliable Public RPC Fallbacks per Chain
@@ -653,34 +662,139 @@ class OnChainStateVerifier:
         except Exception:
             return None
 
+    PROBE_EOA = "0x000000000000000000000000000000000000a11ce"
+    _COLLECT_FN_RE = re.compile(
+        r"function\s+(collect(?:Protocol)?)\s*\(([^)]*)\)\s*(?:public|external)",
+        re.IGNORECASE,
+    )
+
     @staticmethod
-    def probe_unauth_selector(w3, address: str, signature: str, args_addr: Optional[str] = None) -> str:
+    def _classify_probe_error(exc: BaseException) -> str:
+        msg = str(exc).lower()
+        if any(
+            x in msg
+            for x in (
+                "owner", "auth", "caller is not", "unauthorized",
+                "accesscontrol", "ownable", "only ", "only factory",
+                "only platform", "not eoa", "not from", "governance",
+                "forbidden", "access denied", "!gov", "not manager",
+                "not admin", "not keeper", "not operator",
+            )
+        ):
+            return "auth"
+        return "revert"
+
+    @staticmethod
+    def _abi_word_addr(addr: str) -> bytes:
+        return bytes.fromhex(addr.lower().replace("0x", "")[-40:].rjust(64, "0"))
+
+    @staticmethod
+    def _abi_word_uint(value: int) -> bytes:
+        return int(value).to_bytes(32, "big")
+
+    @staticmethod
+    def _abi_dummy_args(types: List[str], recipient: str) -> Optional[bytes]:
+        """ABI-encode dummy args so eth_call hits the real selector."""
+        chunks: List[bytes] = []
+        for raw in types:
+            t = re.sub(r"\b(memory|calldata|storage|indexed)\b", "", raw).strip()
+            t = t.split()[0] if t else ""
+            tl = t.lower().replace(" ", "")
+            if "collectparams" in tl or tl.endswith("params"):
+                inner = OnChainStateVerifier._abi_dummy_args(
+                    ["uint256", "address", "uint128", "uint128"], recipient
+                )
+                if inner is None:
+                    return None
+                chunks.append(inner)
+                continue
+            if tl.startswith("(") and tl.endswith(")"):
+                inner_types = [p.strip() for p in tl[1:-1].split(",") if p.strip()]
+                inner = OnChainStateVerifier._abi_dummy_args(inner_types, recipient)
+                if inner is None:
+                    return None
+                chunks.append(inner)
+                continue
+            if tl == "address":
+                chunks.append(OnChainStateVerifier._abi_word_addr(recipient))
+            elif tl.startswith("uint"):
+                bits = int(tl[4:] or "256")
+                chunks.append(OnChainStateVerifier._abi_word_uint((1 << bits) - 1))
+            elif tl.startswith("int"):
+                chunks.append(OnChainStateVerifier._abi_word_uint(0))
+            else:
+                return None
+        return b"".join(chunks)
+
+    @staticmethod
+    def collect_probe_plan(
+        source_text: str,
+        recipient: str = "0x000000000000000000000000000000000000a11ce",
+    ) -> Optional[Tuple[str, bytes]]:
+        """Return (abi_signature, encoded_args) for the first non-interface collect."""
+        for m in OnChainStateVerifier._COLLECT_FN_RE.finditer(source_text or ""):
+            prefix = source_text[max(0, m.start() - 80): m.start()]
+            if "interface " in prefix:
+                continue
+            name = m.group(1)
+            raw_params = m.group(2).strip()
+            if not raw_params:
+                return f"{name}()", b""
+            types: List[str] = []
+            sig_types: List[str] = []
+            for part in raw_params.split(","):
+                p = re.sub(r"\b(memory|calldata|storage|indexed)\b", "", part).strip()
+                if not p:
+                    continue
+                typ = p.split()[0]
+                types.append(typ)
+                tl = typ.lower()
+                if "collectparams" in tl or tl.endswith("params"):
+                    sig_types.append("(uint256,address,uint128,uint128)")
+                else:
+                    sig_types.append(typ)
+            args = OnChainStateVerifier._abi_dummy_args(types, recipient)
+            if args is None:
+                return None
+            return f"{name}({','.join(sig_types)})", args
+        return None
+
+    @staticmethod
+    def v3_collect_gate(probe: str, eth_balance: float) -> Tuple[bool, str]:
+        """Confirm collect only when an unauth eth_call actually succeeds."""
+        if probe == "auth":
+            return False, "V3_COLLECT_AUTH_REVERTED"
+        if probe == "success":
+            return True, "V3_COLLECT_CALLABLE"
+        if eth_balance < 0.01:
+            return False, "V3_COLLECT_UNFUNDED"
+        return False, "V3_COLLECT_REVERT_OR_UNKNOWN"
+
+    @staticmethod
+    def probe_unauth_selector(
+        w3,
+        address: str,
+        signature: str,
+        args_addr: Optional[str] = None,
+        args_data: Optional[bytes] = None,
+    ) -> str:
         """Probe a selector from a random EOA. Returns success | auth | revert."""
         try:
             sel = w3.keccak(text=signature)[:4]
-            data = sel
-            if args_addr:
+            if args_data is not None:
+                data = sel + args_data
+            elif args_addr:
                 data = sel + bytes.fromhex(args_addr[2:].rjust(64, "0"))
+            else:
+                data = sel
             w3.eth.call({
-                "from": w3.to_checksum_address("0x000000000000000000000000000000000000a11ce"),
+                "from": w3.to_checksum_address(OnChainStateVerifier.PROBE_EOA),
                 "to": w3.to_checksum_address(address),
                 "data": data,
             })
             return "success"
         except Exception as e:
-            msg = str(e).lower()
-            if any(
-                x in msg
-                for x in (
-                    "owner", "auth", "caller is not", "unauthorized",
-                    "accesscontrol", "ownable", "only ", "only factory",
-                    "only platform", "not eoa", "not from", "governance",
-                    "forbidden", "access denied", "!gov", "not manager",
-                    "not admin", "not keeper", "not operator",
-                )
-            ):
-                return "auth"
-            return "revert"
+            return OnChainStateVerifier._classify_probe_error(e)
 
     @staticmethod
     def evaluate_swapback_liveness(w3, token_address: str, source_text: str) -> Dict:
@@ -775,6 +889,64 @@ class OnChainStateVerifier:
             return None
         except Exception:
             return None
+
+    @staticmethod
+    def pair_skim_exploit(
+        w3,
+        chain: str,
+        token: str,
+        pair_hint: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """If a V2 WETH pair holds excess above reserves, skim is a public drain."""
+        from factory_listener import erc20_balance_raw
+        from profit_estimator import estimate_skim_profit, profit_to_dict
+
+        cfg = DEX_CONFIG.get((chain or "").lower())
+        if not w3 or not cfg:
+            return None
+        weth = cfg["weth"]
+        pair = pair_hint
+        amm = {}
+        if not pair:
+            amm = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, token)
+            pair = (amm.get("primary_pool") or {}).get("pair")
+        if not pair:
+            return None
+        if not amm:
+            amm = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, token)
+        res_eth = float(amm.get("eth_reserve") or 0.0)
+        res_tok = float(amm.get("token_reserve") or 0.0)
+        pair_eth = erc20_balance_raw(w3, weth, pair) / 1e18
+        pair_tok = erc20_balance_raw(w3, token, pair) / 1e18
+        est = estimate_skim_profit(
+            pair_eth=pair_eth,
+            pair_token=pair_tok,
+            reserve_eth=res_eth,
+            reserve_token=res_tok,
+        )
+        if not est.actionable:
+            return None
+        probe = OnChainStateVerifier.probe_unauth_selector(
+            w3, pair, "skim(address)", args_addr=OnChainStateVerifier.PROBE_EOA
+        )
+        if probe != "success":
+            return None
+        payload = profit_to_dict(est)
+        return {
+            "type": "PAIR_SKIM",
+            "user_exploitable": True,
+            "severity": "HIGH",
+            "title": "UniV2 skim of excess pair balances",
+            "exploiter": "Cualquier EOA (pair.skim(to))",
+            "victim": "WETH/token donado o leftover FoT en el par",
+            "payoff": "Extraer balance - getReserves y vender el token.",
+            "snippet": "function skim(address to) external;",
+            "onchain_evidence": (
+                f"pair={pair} skim_probe={probe} excess_eth={pair_eth - res_eth:.4f} "
+                f"excess_token={pair_tok - res_tok:.4f} profit={est.expected_profit_eth:.4f}"
+            ),
+            "profit": payload,
+        }
 
     @staticmethod
     def verify_onchain_liveness(address: str, chain: str, static_exploits: List[Dict], source_text: str) -> Tuple[bool, str, float, List[Dict], Optional[Dict]]:
@@ -888,7 +1060,11 @@ class OnChainStateVerifier:
                     status_notes.append("INITIALIZE_OPEN_BUT_UNFUNDED")
 
             elif vtype == "SIGNATURE_REPLAY_FLAW":
-                if any(h in source_text for h in SAFE_HINTS) or "sequenceId" in source_text:
+                if (
+                    any(h in source_text for h in SAFE_HINTS)
+                    or any(h in source_text for h in SIG_REPLAY_MITIGATED)
+                    or "sequenceId" in source_text
+                ):
                     status_notes.append("SIGNATURE_REPLAY_SAFE_OR_SEQUENCE_MITIGATED")
                 elif eth_balance > 0.01:
                     exp["onchain_evidence"] = f"Funded contract ({eth_balance:.4f} ETH) with un-nonce'd ecrecover"
@@ -1040,6 +1216,25 @@ class OnChainStateVerifier:
                     confirmed_exploits.append(exp)
                     status_notes.append("MULTICALL_MSGVALUE_FUNDED")
 
+            elif vtype == "V3_COLLECT_UNPROTECTED":
+                plan = OnChainStateVerifier.collect_probe_plan(source_text)
+                if plan is None:
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, address, "collect()"
+                    )
+                else:
+                    sig, args_data = plan
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, address, sig, args_data=args_data
+                    )
+                confirm, note = OnChainStateVerifier.v3_collect_gate(probe, eth_balance)
+                status_notes.append(note)
+                if confirm:
+                    exp["onchain_evidence"] = (
+                        f"Ungated collect probe={probe}; native={eth_balance:.4f} ETH"
+                    )
+                    confirmed_exploits.append(exp)
+
             elif vtype == "PUBLIC_SWAPBACK_TRIGGER":
                 live = OnChainStateVerifier.evaluate_swapback_liveness(w3, address, source_text)
                 amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, address)
@@ -1075,6 +1270,12 @@ class OnChainStateVerifier:
             else:
                 status_notes.append(f"{vtype}_NO_DYNAMIC_GATE")
 
+        skim_exp = None
+        try:
+            skim_exp = OnChainStateVerifier.pair_skim_exploit(w3, chain, address)
+        except Exception:
+            skim_exp = None
+
         if confirmed_exploits:
             if profit_gate_enabled():
                 amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
@@ -1103,6 +1304,14 @@ class OnChainStateVerifier:
                         exp["profit"] = payload
                 confirmed_exploits = kept
                 profit_payload = payload
+
+        if skim_exp:
+            confirmed_exploits.append(skim_exp)
+            status_notes.append("PAIR_SKIM_ACTIONABLE")
+            sp = skim_exp.get("profit") or {}
+            cur = float((profit_payload or {}).get("expected_profit_eth") or 0.0)
+            if float(sp.get("expected_profit_eth") or 0.0) >= cur:
+                profit_payload = sp
 
         is_active = len(confirmed_exploits) > 0
         final_status = " | ".join(status_notes) if status_notes else "STATIC_ONLY"
@@ -1461,13 +1670,11 @@ class StaticVulnerabilityAuditor:
         # 14. Signature Replay / Nonce-less Verification
         sig_match = re.search(r"ecrecover\s*\([^)]*\)", source_text)
         looks_like_safe = any(h in source_text for h in SAFE_HINTS)
+        replay_mitigated = any(h in source_text for h in SIG_REPLAY_MITIGATED)
         if (
             sig_match
             and not looks_like_safe
-            and "nonces[" not in source_text
-            and "_useNonce" not in source_text
-            and "usedSignatures" not in source_text
-            and "function nonce(" not in source_text
+            and not replay_mitigated
         ):
             findings["has_signature_replay_flaw"] = True
             snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, sig_match.start())
@@ -1582,11 +1789,44 @@ class StaticVulnerabilityAuditor:
                     "snippet": snippet,
                 })
 
-        # 19. Public swapBack / swapAndLiquify trigger
-        pub_swap = re.search(
-            r"function\s+(swapBack|swapAndLiquify)\s*\([^)]*\)\s*(?:public|external)",
+        # 18b. Unprotected Uniswap V3 collect (fees to caller)
+        collect_m = re.search(
+            r"function\s+collect(?:Protocol)?\s*\([^)]*\)\s*(?:public|external)",
             source_text,
         )
+        if (
+            collect_m
+            and "{" in source_text[collect_m.start(): collect_m.start() + 250]
+            and StaticVulnerabilityAuditor._header_lacks_auth(source_text, collect_m)
+            and "interface " not in source_text[max(0, collect_m.start() - 80): collect_m.start()]
+        ):
+            findings["has_unprotected_critical_function"] = True
+            snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, collect_m.start())
+            evidence_list.append({
+                "type": "V3_COLLECT_UNPROTECTED",
+                "user_exploitable": True,
+                "title": "collect() de fees V3 sin control de acceso",
+                "severity": "HIGH",
+                "exploiter": "Cualquier Usuario / Bot",
+                "victim": "Fees de una posición Uniswap V3",
+                "payoff": "Cobrar tokensOwed / protocol fees a msg.sender.",
+                "snippet": snippet,
+            })
+
+        # 19. Public swapBack / swapAndLiquify / manualSwap trigger
+        pub_swap = re.search(
+            r"function\s+(swapBack|swapAndLiquify|manualSwap)\s*\([^)]*\)\s*(?:public|external)",
+            source_text,
+        )
+        if pub_swap and StaticVulnerabilityAuditor._header_lacks_auth(source_text, pub_swap):
+            chunk = source_text[pub_swap.start(): pub_swap.start() + 600]
+            tax_gated = re.search(
+                r"_taxWallet|_marketingWallet|taxWallet|marketingWallet|"
+                r"msg\.sender\s*==\s*[_a-zA-Z].*(?:[Ww]allet|[Oo]wner)",
+                chunk,
+            )
+            if tax_gated:
+                pub_swap = None
         if pub_swap and StaticVulnerabilityAuditor._header_lacks_auth(source_text, pub_swap):
             findings["has_public_swapback"] = True
             snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, pub_swap.start())

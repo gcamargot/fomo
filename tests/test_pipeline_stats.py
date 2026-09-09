@@ -102,6 +102,42 @@ def test_factory_status_buckets(tmp_path):
     assert stats["factory"] == {"no_source": 1, "dust": 1, "actionable": 1, "total": 3}
 
 
+def test_profit_pass_ignores_factory_xyk_and_fp_status(tmp_path):
+    db = TokenScannerDB(str(tmp_path / "t.db"))
+    _row(
+        db,
+        "0x" + "a" * 40,
+        verified=False,
+        dynamic_status="FACTORY_NEW_PAIR_ACTIONABLE",
+        expected_profit_eth=0.16,
+    )
+    _row(
+        db,
+        "0x" + "b" * 40,
+        dynamic_status="FP_OZ_ECDSA",
+        expected_profit_eth=1.2,
+        is_user_exploitable=1,
+        onchain_verified=1,
+    )
+    _row(
+        db,
+        "0x" + "c" * 40,
+        dynamic_status="PUBLIC_SWAPBACK_ACTIVE",
+        expected_profit_eth=0.4,
+        is_user_exploitable=1,
+        onchain_verified=1,
+        has_public_swapback=1,
+        triage_file_path="/tmp/t.md",
+    )
+    with db.get_connection() as conn:
+        stats = collect_pipeline_stats(conn, triage_dir=str(tmp_path / "q"), min_profit_eth=0.05)
+    assert stats["hits"]["profit_pass"] == 1
+    addrs = [r["address"] for r in stats["top_expected_profit"]]
+    assert "0x" + "c" * 40 in addrs
+    assert "0x" + "a" * 40 not in addrs
+    assert "0x" + "b" * 40 not in addrs
+
+
 def test_dashboard_ignores_tx_origin_permit_inventory(tmp_path):
     db = TokenScannerDB(str(tmp_path / "t.db"))
     _row(db, "0x" + "d" * 40, has_tx_origin_auth=1, has_permit_no_nonce=1)

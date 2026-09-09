@@ -175,6 +175,8 @@ def process_factory_pair(
     treasury_raw,
     fork_result=None,
     fork_run=None,
+    pair_balances=None,
+    skim_probe=None,
 ) -> bool:
     """Ingest a new WETH pair: persist row, profit estimate, optional full pipeline.
 
@@ -224,11 +226,13 @@ def process_factory_pair(
     else:
         from profit_estimator import profit_to_dict
         profit_payload = profit_to_dict(est)
-        status = (
-            "FACTORY_NEW_PAIR_ACTIONABLE"
-            if est.actionable
-            else "FACTORY_NEW_PAIR_DUST"
-        )
+        # XYK on a tax bucket without source/trigger is not a user-exploitable hit.
+        if not src:
+            status = "FACTORY_NEW_PAIR_NO_SOURCE"
+        elif est.actionable:
+            status = "FACTORY_NEW_PAIR_NO_EXPLOIT"
+        else:
+            status = "FACTORY_NEW_PAIR_DUST"
 
     emit = False
     if src and user_exploits:
@@ -254,14 +258,51 @@ def process_factory_pair(
             estimate=est,
         )
 
+    from profit_estimator import estimate_skim_profit, profit_to_dict as _profit_to_dict
+
+    pair_eth, pair_tok = float(pool_eth or 0.0), float(pool_token or 0.0)
+    if pair_balances is not None:
+        try:
+            pair_eth, pair_tok = pair_balances()
+            pair_eth, pair_tok = float(pair_eth or 0.0), float(pair_tok or 0.0)
+        except Exception:
+            pass
+    skim_est = estimate_skim_profit(
+        pair_eth=pair_eth,
+        pair_token=pair_tok,
+        reserve_eth=float(pool_eth or 0.0),
+        reserve_token=float(pool_token or 0.0),
+    )
+    if skim_est.actionable:
+        probe = "revert"
+        if skim_probe is not None:
+            try:
+                probe = str(skim_probe() or "revert")
+            except Exception:
+                probe = "revert"
+        if probe == "success":
+            skim_exp = {
+                "type": "PAIR_SKIM",
+                "user_exploitable": True,
+                "severity": "HIGH",
+                "title": "UniV2 skim of excess pair balances",
+                "exploiter": "Cualquier EOA (pair.skim(to))",
+                "victim": "WETH/token donado o leftover FoT en el par",
+                "payoff": "Extraer balance - getReserves.",
+                "snippet": "function skim(address to) external;",
+                "profit": _profit_to_dict(skim_est),
+            }
+            confirmed = list(confirmed or []) + [skim_exp]
+            user_exploits = list(user_exploits or []) + [skim_exp]
+            emit = True
+            status = "PAIR_SKIM_ACTIONABLE"
+            profit_payload = _profit_to_dict(skim_est)
+        elif not emit:
+            status = f"PAIR_SKIM_{probe.upper()}"
+
     pair = str(ev.get("pair") or "").lower() or None
     fields: Dict[str, Any] = {
         "dynamic_status": status,
-        "expected_profit_eth": (
-            (profit_payload or {}).get("expected_profit_eth")
-            if profit_payload
-            else est.expected_profit_eth
-        ),
         "state_snapshot": json.dumps(
             snapshot_to_dict(
                 StateSnapshot(
@@ -272,6 +313,12 @@ def process_factory_pair(
             )
         ),
     }
+    if (src and user_exploits) or (profit_payload and status == "PAIR_SKIM_ACTIONABLE"):
+        fields["expected_profit_eth"] = (
+            (profit_payload or {}).get("expected_profit_eth")
+            if profit_payload
+            else est.expected_profit_eth
+        )
     if src:
         fields["verified"] = 1
     for col in _AUDIT_FLAG_COLS:
@@ -319,6 +366,16 @@ def handle_factory_pair(db, chain: str, ev: Dict[str, str], w3) -> bool:
         estimate=lambda **k: estimate_swapback_sandwich_profit(**k),
         reserves=lambda: pair_reserves_eth_token(w3, ev.get("pair") or "", ev.get("weth") or ""),
         treasury_raw=lambda: erc20_balance_raw(w3, token, token),
+        pair_balances=lambda: (
+            erc20_balance_raw(w3, ev.get("weth") or "", ev.get("pair") or "") / 1e18,
+            erc20_balance_raw(w3, token, ev.get("pair") or "") / 1e18,
+        ),
+        skim_probe=lambda: OnChainStateVerifier.probe_unauth_selector(
+            w3,
+            ev.get("pair") or "",
+            "skim(address)",
+            args_addr="0x000000000000000000000000000000000000a11ce",
+        ),
         fork_run=lambda: run_fork_profit_test(token, chain),
     )
 

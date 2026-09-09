@@ -132,10 +132,47 @@ class DormantBalanceWatcher:
     def check_zero_slippage_dormant(self, target: Dict) -> bool:
         return self.check_and_update_contract(target)
 
+    def _emit_pair_skim(self, target: Dict) -> bool:
+        chain = (target.get("chain") or "").lower()
+        addr = target.get("address") or ""
+        pair = None
+        raw = target.get("state_snapshot")
+        if raw:
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                pair = (data or {}).get("pair")
+            except (TypeError, json.JSONDecodeError):
+                pair = None
+        if not pair or not addr:
+            return False
+        w3 = self.web3_clients.get(chain) or OnChainStateVerifier.get_web3_client(chain)
+        if not w3:
+            return False
+        exp = OnChainStateVerifier.pair_skim_exploit(w3, chain, addr, pair_hint=str(pair))
+        if not exp:
+            return False
+        profit = exp.get("profit") or {}
+        target["profit"] = profit
+        target["dynamic_status"] = "PAIR_SKIM_ACTIONABLE"
+        path = TriageReportGenerator.generate_triage_file(target, [exp])
+        flags = {
+            "is_user_exploitable": 1,
+            "onchain_verified": 1,
+            "dynamic_status": "PAIR_SKIM_ACTIONABLE",
+            "triage_file_path": path,
+        }
+        if profit.get("expected_profit_eth") is not None:
+            flags["expected_profit_eth"] = profit["expected_profit_eth"]
+        self.db.update_token_flags(addr, flags)
+        AlertDispatcher.emit_triage_alert(target, [exp], path)
+        return True
+
     def check_and_update_contract(self, target: Dict) -> bool:
         """Re-run full liveness + profit gates. Do not alert just because ETH arrived."""
         chain = (target.get("chain") or "").lower()
         addr = target["address"]
+        if self._emit_pair_skim(target):
+            return True
         src = load_saved_source(chain, addr)
         if not src:
             return False

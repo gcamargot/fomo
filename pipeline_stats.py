@@ -81,7 +81,12 @@ def collect_pipeline_stats(
         """
     ).fetchone()[0]
     profit_pass = cur.execute(
-        "SELECT COUNT(*) FROM tokens WHERE IFNULL(expected_profit_eth, 0) >= ?",
+        """
+        SELECT COUNT(*) FROM tokens
+        WHERE IFNULL(expected_profit_eth, 0) >= ?
+          AND IFNULL(is_user_exploitable, 0) = 1
+          AND IFNULL(dynamic_status, '') NOT LIKE 'FP_%'
+        """,
         (float(min_profit_eth),),
     ).fetchone()[0]
 
@@ -145,6 +150,8 @@ def collect_pipeline_stats(
                    triage_file_path
             FROM tokens
             WHERE expected_profit_eth IS NOT NULL AND expected_profit_eth > 0
+              AND IFNULL(dynamic_status, '') NOT LIKE 'FP_%'
+              AND IFNULL(dynamic_status, '') NOT LIKE '%FACTORY_NEW_PAIR%'
             ORDER BY expected_profit_eth DESC
             LIMIT ?
             """,
