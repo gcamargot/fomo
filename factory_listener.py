@@ -176,6 +176,7 @@ def process_factory_pair(
     fork_result=None,
     fork_run=None,
     pair_balances=None,
+    skim_probe=None,
 ) -> bool:
     """Ingest a new WETH pair: persist row, profit estimate, optional full pipeline.
 
@@ -273,22 +274,31 @@ def process_factory_pair(
         reserve_token=float(pool_token or 0.0),
     )
     if skim_est.actionable:
-        skim_exp = {
-            "type": "PAIR_SKIM",
-            "user_exploitable": True,
-            "severity": "HIGH",
-            "title": "UniV2 skim of excess pair balances",
-            "exploiter": "Cualquier EOA (pair.skim(to))",
-            "victim": "WETH/token donado o leftover FoT en el par",
-            "payoff": "Extraer balance - getReserves.",
-            "snippet": "function skim(address to) external;",
-            "profit": _profit_to_dict(skim_est),
-        }
-        confirmed = list(confirmed or []) + [skim_exp]
-        user_exploits = list(user_exploits or []) + [skim_exp]
-        emit = True
-        status = "PAIR_SKIM_ACTIONABLE"
-        profit_payload = _profit_to_dict(skim_est)
+        probe = "revert"
+        if skim_probe is not None:
+            try:
+                probe = str(skim_probe() or "revert")
+            except Exception:
+                probe = "revert"
+        if probe == "success":
+            skim_exp = {
+                "type": "PAIR_SKIM",
+                "user_exploitable": True,
+                "severity": "HIGH",
+                "title": "UniV2 skim of excess pair balances",
+                "exploiter": "Cualquier EOA (pair.skim(to))",
+                "victim": "WETH/token donado o leftover FoT en el par",
+                "payoff": "Extraer balance - getReserves.",
+                "snippet": "function skim(address to) external;",
+                "profit": _profit_to_dict(skim_est),
+            }
+            confirmed = list(confirmed or []) + [skim_exp]
+            user_exploits = list(user_exploits or []) + [skim_exp]
+            emit = True
+            status = "PAIR_SKIM_ACTIONABLE"
+            profit_payload = _profit_to_dict(skim_est)
+        elif not emit:
+            status = f"PAIR_SKIM_{probe.upper()}"
 
     pair = str(ev.get("pair") or "").lower() or None
     fields: Dict[str, Any] = {
@@ -359,6 +369,12 @@ def handle_factory_pair(db, chain: str, ev: Dict[str, str], w3) -> bool:
         pair_balances=lambda: (
             erc20_balance_raw(w3, ev.get("weth") or "", ev.get("pair") or "") / 1e18,
             erc20_balance_raw(w3, token, ev.get("pair") or "") / 1e18,
+        ),
+        skim_probe=lambda: OnChainStateVerifier.probe_unauth_selector(
+            w3,
+            ev.get("pair") or "",
+            "skim(address)",
+            args_addr="0x000000000000000000000000000000000000a11ce",
         ),
         fork_run=lambda: run_fork_profit_test(token, chain),
     )
