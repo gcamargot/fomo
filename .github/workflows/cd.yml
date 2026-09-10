@@ -57,6 +57,14 @@ jobs:
     needs: build-and-push
     runs-on: self-hosted
     steps:
+      - name: Ensure Workspace Permissions
+        run: |
+          if command -v sudo >/dev/null 2>&1; then
+            sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE"
+          else
+            chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE"
+          fi
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
