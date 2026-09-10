@@ -57,25 +57,34 @@ jobs:
     needs: build-and-push
     runs-on: self-hosted
     steps:
-      - name: Ensure Workspace Permissions
+      # Do not use actions/checkout here. The compose volume ./contracts is
+      # written as root by the container; checkout then tries to rmRF the
+      # workspace (even with clean: false when .git is missing) and dies on
+      # EACCES — or, after a chown, would delete the live SQLite corpus.
+      - name: Sync repo without wiping contracts volume
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if command -v sudo >/dev/null 2>&1; then
-            sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE"
-          else
-            chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE"
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          if [ ! -d .git ]; then
+            git init
           fi
-
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          clean: false
+          if git remote get-url origin >/dev/null 2>&1; then
+            git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          else
+            git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          fi
+          git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" \
+            fetch --depth 1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
+          git clean -ffdx -e contracts -e .env
+          git log -1 --oneline
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
       - name: Pull Latest Docker Image
         run: docker compose pull
@@ -86,4 +95,5 @@ jobs:
       - name: Verify Container Health
         run: |
           docker compose ps
-          echo "✓ FOMO Smart Contract Security Suite deployed successfully to Homelab!"
+          docker inspect fomo-security-suite --format 'image={{.Image}} status={{.State.Status}}'
+          echo "FOMO deployed to homelab"
