@@ -662,7 +662,9 @@ class OnChainStateVerifier:
         except Exception:
             return None
 
-    PROBE_EOA = "0x000000000000000000000000000000000000a11ce"
+    # 20-byte throwaway EOA (40 hex). The old "...000a11ce" string was 41 hex
+    # and web3 raised on to_checksum_address, so every probe looked like revert.
+    PROBE_EOA = "0x00000000000000000000000000000000000A11cE"
     _COLLECT_FN_RE = re.compile(
         r"function\s+(collect(?:Protocol)?)\s*\(([^)]*)\)\s*(?:public|external)",
         re.IGNORECASE,
@@ -729,7 +731,7 @@ class OnChainStateVerifier:
     @staticmethod
     def collect_probe_plan(
         source_text: str,
-        recipient: str = "0x000000000000000000000000000000000000a11ce",
+        recipient: str = "0x00000000000000000000000000000000000A11cE",
     ) -> Optional[Tuple[str, bytes]]:
         """Return (abi_signature, encoded_args) for the first non-interface collect."""
         for m in OnChainStateVerifier._COLLECT_FN_RE.finditer(source_text or ""):
@@ -861,8 +863,8 @@ class OnChainStateVerifier:
         """
         try:
             token = w3.to_checksum_address(token_address)
-            alice = w3.to_checksum_address("0x000000000000000000000000000000000000a11ce")
-            bob = w3.to_checksum_address("0x0000000000000000000000000000000000000b0b")
+            alice = w3.to_checksum_address(OnChainStateVerifier.PROBE_EOA)
+            bob = w3.to_checksum_address("0x0000000000000000000000000000000000000B0b")
             amount = 10 ** 18
             calldata = (
                 "0xa9059cbb"
