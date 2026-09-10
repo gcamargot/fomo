@@ -66,6 +66,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          export GIT_TERMINAL_PROMPT=0
           cd "${GITHUB_WORKSPACE}"
           if [ ! -d .git ]; then
             git init
@@ -75,7 +76,9 @@ jobs:
           else
             git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           fi
-          git -c http.extraheader="AUTHORIZATION: bearer ${GH_TOKEN}" \
+          # Git HTTPS wants Basic x-access-token (checkout action), not Bearer.
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | openssl base64 -A)"
+          git -c "http.extraheader=AUTHORIZATION: basic ${auth}" \
             fetch --depth 1 origin "${GITHUB_SHA}"
           git checkout --force FETCH_HEAD
           git clean -ffdx -e contracts -e .env
