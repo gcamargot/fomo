@@ -60,9 +60,9 @@ jobs:
       - name: Ensure Workspace Permissions
         run: |
           if command -v sudo >/dev/null 2>&1; then
-            sudo chown -R "$USER":"$USER" "$GITHUB_WORKSPACE"
+            sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE"
           else
-            chown -R "$USER":"$USER" "$GITHUB_WORKSPACE"
+            chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE"
           fi
 
       - name: Checkout Repository
