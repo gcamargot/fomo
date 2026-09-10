@@ -37,7 +37,7 @@ def test_pair_reserves_weth_token0():
 
 
 def test_pair_reserves_none_w3():
-    assert pair_reserves_eth_token(None, PAIR, WETH) == (0.0, 0.0)
+    assert pair_reserves_eth_token(None, PAIR, WETH) == (None, None)
 
 
 def test_erc20_balance_raw():

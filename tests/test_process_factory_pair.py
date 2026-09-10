@@ -141,6 +141,29 @@ def test_skim_excess_without_callable_skim_does_not_emit():
     assert flags.get("is_user_exploitable") != 1
 
 
+def test_skim_skipped_when_reserves_unreadable():
+    db = MagicMock()
+    gen = MagicMock()
+    process_factory_pair(
+        db,
+        "base",
+        EV,
+        load_source=lambda *a: "",
+        audit=lambda src: ({}, []),
+        verify=lambda *a: (False, "X", 0.0, [], None),
+        generate_triage=gen,
+        estimate=lambda **k: _est(actionable=False),
+        reserves=lambda: (None, None),
+        treasury_raw=lambda: 0,
+        pair_balances=lambda: (15.0, 1000.0),
+        skim_probe=lambda: "success",
+    )
+    gen.assert_not_called()
+    flags = db.update_token_flags.call_args[0][1]
+    assert flags["dynamic_status"] == "PAIR_SKIM_RESERVES_UNKNOWN"
+    assert flags.get("is_user_exploitable") != 1
+
+
 def test_skim_excess_without_probe_does_not_emit():
     db = MagicMock()
     gen = MagicMock()

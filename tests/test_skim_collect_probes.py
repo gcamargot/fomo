@@ -2,7 +2,15 @@
 
 from unittest.mock import MagicMock
 
+from web3 import Web3
+
 from token_scanner_daemon import OnChainStateVerifier
+
+
+def test_probe_eoa_is_valid_checksum_address():
+    checksummed = Web3.to_checksum_address(OnChainStateVerifier.PROBE_EOA)
+    assert OnChainStateVerifier.PROBE_EOA == checksummed
+    assert len(OnChainStateVerifier.PROBE_EOA) == 42
 
 
 def test_v3_collect_gate_ignores_funded_revert():

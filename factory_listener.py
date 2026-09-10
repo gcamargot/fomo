@@ -135,10 +135,16 @@ def _checksum(w3, addr: str) -> str:
     return fn(addr) if callable(fn) else addr
 
 
-def pair_reserves_eth_token(w3, pair: str, weth: str) -> Tuple[float, float]:
-    """Return (pool_eth, pool_token) from a UniV2 pair. (0, 0) on RPC errors."""
+def pair_reserves_eth_token(
+    w3, pair: str, weth: str
+) -> Tuple[Optional[float], Optional[float]]:
+    """Return (pool_eth, pool_token). (None, None) if the pair cannot be read.
+
+    Distinguishes a successful empty pair (0, 0) from an RPC/ABI failure.
+    Treating failures as (0, 0) makes the whole WETH balance look like skim.
+    """
     if w3 is None or not pair:
-        return 0.0, 0.0
+        return None, None
     try:
         pair_c = w3.eth.contract(address=_checksum(w3, pair), abi=_PAIR_ABI)
         r0, r1, _ = pair_c.functions.getReserves().call()
@@ -148,7 +154,7 @@ def pair_reserves_eth_token(w3, pair: str, weth: str) -> Tuple[float, float]:
         token_reserve = (r1 if weth_is_t0 else r0) / 1e18
         return float(eth_reserve), float(token_reserve)
     except Exception:
-        return 0.0, 0.0
+        return None, None
 
 
 def erc20_balance_raw(w3, token: str, holder: str) -> int:
@@ -193,8 +199,12 @@ def process_factory_pair(
         verified=False,
     )
     pool_eth, pool_token = 0.0, 0.0
+    reserves_known = False
     try:
-        pool_eth, pool_token = reserves()
+        got_eth, got_tok = reserves()
+        if got_eth is not None and got_tok is not None:
+            pool_eth, pool_token = float(got_eth), float(got_tok)
+            reserves_known = True
     except Exception:
         pass
     raw = 0
@@ -273,6 +283,13 @@ def process_factory_pair(
         reserve_eth=float(pool_eth or 0.0),
         reserve_token=float(pool_token or 0.0),
     )
+    if skim_est.actionable and not reserves_known:
+        # getReserves failed: do not treat the whole WETH balance as excess.
+        if not emit:
+            status = "PAIR_SKIM_RESERVES_UNKNOWN"
+        skim_est = estimate_skim_profit(
+            pair_eth=0.0, pair_token=0.0, reserve_eth=0.0, reserve_token=0.0
+        )
     if skim_est.actionable:
         probe = "revert"
         if skim_probe is not None:
@@ -374,7 +391,7 @@ def handle_factory_pair(db, chain: str, ev: Dict[str, str], w3) -> bool:
             w3,
             ev.get("pair") or "",
             "skim(address)",
-            args_addr="0x000000000000000000000000000000000000a11ce",
+            args_addr=OnChainStateVerifier.PROBE_EOA,
         ),
         fork_run=lambda: run_fork_profit_test(token, chain),
     )
