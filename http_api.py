@@ -152,6 +152,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </header>
 <main>
   <div class="grid" id="kpis"></div>
+  <h2>Contratos por red</h2>
+  <p class="muted">Total indexado en SQLite. Se refresca cada 30 s. Δ es el cambio desde el poll anterior.</p>
+  <div class="grid" id="chains"></div>
   <h2>Cola de triage</h2>
   <p class="muted">TP = verdadero positivo (queda como hit). FP = falso, sale de la cola y la DB.</p>
   <div id="queue"></div>
@@ -177,10 +180,13 @@ async function mark(chain, addr, verdict) {
   if (!res.ok) { alert(res.error || JSON.stringify(res)); return; }
   load();
 }
+let prevByChain = {};
+const CHAIN_ORDER = ['base','ethereum','arbitrum','solana'];
 async function load() {
   const s = await j('/stats');
   if (s.error) { document.getElementById('meta').textContent = s.error; return; }
   const h = s.hits || {}, w = s.watchlist || {}, f = s.factory || {}, c = s.corpus || {};
+  const by = c.by_chain || {};
   document.getElementById('meta').textContent =
     'corpus ' + (c.total||0) + ' · min ' + (h.min_profit_eth||0.05) + ' ETH · ' + new Date().toLocaleString();
   document.getElementById('kpis').innerHTML = [
@@ -192,6 +198,14 @@ async function load() {
     kpi('unfunded', w.unfunded_drain||0),
     kpi('factory', (f.total||0) + ' / act ' + (f.actionable||0)),
   ].join('');
+  const names = CHAIN_ORDER.filter(n => by[n] != null).concat(Object.keys(by).filter(n => !CHAIN_ORDER.includes(n)).sort());
+  document.getElementById('chains').innerHTML = names.map(n => {
+    const v = by[n]||0;
+    const d = v - (prevByChain[n]||v);
+    const delta = Object.keys(prevByChain).length ? (d>0? ' +'+d : (d<0? ' '+d : '')) : '';
+    return kpi(n + delta, v);
+  }).join('') || '<p class="muted">Sin filas por cadena.</p>';
+  prevByChain = Object.assign({}, by);
   const q = (h.queue||[]);
   if (!q.length) {
     document.getElementById('queue').innerHTML = '<p class="muted">Nada en contracts/triage_queue.</p>';
@@ -218,7 +232,7 @@ async function load() {
     : '<p class="muted">Sin filas de profit.</p>';
 }
 load();
-setInterval(load, 15000);
+setInterval(load, 30000);
 </script>
 </body>
 </html>
