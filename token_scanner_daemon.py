@@ -2294,6 +2294,40 @@ class TriageReportGenerator:
 
         return full_path
 
+BLOCKSCOUT_BACKFILL_DONE = -1
+
+
+def blockscout_backfill_enabled() -> bool:
+    raw = os.environ.get("FOMO_BLOCKSCOUT_BACKFILL", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def addresses_from_blockscout_page(
+    payload: Dict[str, Any],
+    limit: Optional[int] = None,
+) -> Tuple[List[str], Optional[int]]:
+    """Parse Blockscout GET /smart-contracts JSON → (addresses, next smart_contract_id)."""
+    items = payload.get("items") or []
+    addrs: List[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        addr = item.get("address") or item.get("address_hash")
+        if isinstance(addr, dict):
+            addr = addr.get("hash")
+        if addr:
+            addrs.append(str(addr).lower())
+        if limit is not None and len(addrs) >= limit:
+            break
+    nxt = payload.get("next_page_params") or {}
+    scid = nxt.get("smart_contract_id") if isinstance(nxt, dict) else None
+    try:
+        next_id = int(scid) if scid is not None else None
+    except (TypeError, ValueError):
+        next_id = None
+    return addrs, next_id
+
+
 class ChainScannerWorker:
     """
     Worker that independently monitors a specific chain with Two-Stage validation.
@@ -2321,6 +2355,20 @@ class ChainScannerWorker:
             self.pending_retry.append(addr)
             self._pending_seen.add(addr)
 
+    def _blockscout_url(self) -> str:
+        bs_v2 = (self.evm_extractor.config or {}).get("blockscout_v2") if self.evm_extractor else None
+        return f"{bs_v2}/smart-contracts" if bs_v2 else ""
+
+    def _blockscout_get(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        url = self._blockscout_url()
+        if not url:
+            return {}
+        resp = self.evm_extractor.session.get(url, params=params or None, timeout=15)
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+
     def fetch_recent_contracts(self, limit: int = 25) -> List[str]:
         if self.chain == "solana":
             recent_addrs = set()
@@ -2330,25 +2378,50 @@ class ChainScannerWorker:
                     recent_addrs.add(sig)
             return list(recent_addrs)
 
-        bs_v2 = self.evm_extractor.config.get("blockscout_v2")
-        if not bs_v2:
+        try:
+            addrs, _nxt = addresses_from_blockscout_page(self._blockscout_get(), limit=limit)
+            return addrs
+        except Exception:
             return []
 
-        url = f"{bs_v2}/smart-contracts"
+    def _backfill_cursor_key(self) -> str:
+        return f"{self.chain}:blockscout:verified"
+
+    def fetch_backfill_contracts(self, pages: Optional[int] = None) -> List[str]:
+        """Older Blockscout pages. Cursor -1 means history is exhausted."""
+        if self.chain == "solana" or not blockscout_backfill_enabled():
+            return []
+        if pages is None:
+            pages = int(os.environ.get("FOMO_BACKFILL_PAGES", "2"))
+        if pages < 1 or not self._blockscout_url():
+            return []
+        key = self._backfill_cursor_key()
+        cur = self.db.get_cursor(key, default=0)
+        if cur == BLOCKSCOUT_BACKFILL_DONE:
+            return []
+        out: List[str] = []
         try:
-            resp = self.evm_extractor.session.get(url, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                items = data.get("items", [])
-                addresses = []
-                for item in items[:limit]:
-                    addr = item.get("address", {}).get("hash")
-                    if addr:
-                        addresses.append(addr.lower())
-                return addresses
+            if cur == 0:
+                _page1, next_id = addresses_from_blockscout_page(self._blockscout_get())
+                if next_id is None:
+                    self.db.set_cursor(key, BLOCKSCOUT_BACKFILL_DONE)
+                    return []
+                cur = next_id
+                self.db.set_cursor(key, cur)
+            for _ in range(pages):
+                payload = self._blockscout_get(
+                    {"items_count": 50, "smart_contract_id": cur}
+                )
+                addrs, next_id = addresses_from_blockscout_page(payload)
+                out.extend(addrs)
+                if next_id is None:
+                    self.db.set_cursor(key, BLOCKSCOUT_BACKFILL_DONE)
+                    break
+                cur = next_id
+                self.db.set_cursor(key, cur)
         except Exception:
-            pass
-        return []
+            return out
+        return out
 
     def scan_contract(self, address: str) -> Optional[Dict]:
         address = address.lower().strip()
@@ -2508,7 +2581,7 @@ class ChainScannerWorker:
                 f"DB-deferred address(es)[/]"
             )
 
-        fresh = self.fetch_recent_contracts(limit=25)
+        fresh = self.fetch_recent_contracts(limit=25) + self.fetch_backfill_contracts()
         # Preserve retry order, then new explorer hits (deduped).
         seen: Set[str] = set()
         contracts: List[str] = []
