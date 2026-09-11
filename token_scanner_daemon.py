@@ -1139,7 +1139,7 @@ class OnChainStateVerifier:
                 else:
                     status_notes.append("SIGNATURE_REPLAY_EMPTY_BALANCE")
 
-            elif vtype == "ERC4626_INFLATION_ATTACK":
+            elif vtype in ("ERC4626_INFLATION_ATTACK", "COMPOUND_EMPTY_MARKET"):
                 from profit_estimator import estimate_vault_inflation_profit, profit_to_dict as _ptd
                 from profit_estimator import xyk_amount_out
 
@@ -1692,6 +1692,26 @@ class StaticVulnerabilityAuditor:
                     "payoff": "Robo del depósito de la víctima mediante truncamiento por división entera.",
                     "snippet": snippet
                 })
+
+        # 6b. Compound V2 empty-market donation (Sonne / Hundred / Onyx)
+        if (
+            "exchangeRateStored" in source_text
+            and ("getCashPrior" in source_text or re.search(r"function\s+getCash\b", source_text))
+            and re.search(r"totalSupply\s*==\s*0", source_text)
+        ):
+            findings["has_vault_inflation"] = True
+            idx = source_text.find("exchangeRateStored")
+            snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, max(0, idx))
+            evidence_list.append({
+                "type": "COMPOUND_EMPTY_MARKET",
+                "user_exploitable": True,
+                "title": "Compound V2 empty-market donation (exchangeRate)",
+                "severity": "HIGH",
+                "exploiter": "Primer minter + donate underlying",
+                "victim": "Mercado cToken / soToken vacío",
+                "payoff": "Inflar exchangeRate y pedir prestado contra collateral fantasma.",
+                "snippet": snippet,
+            })
 
         # 7. Fee-on-Transfer Invariant Violation
         fot_match = re.search(r"function\s+deposit\w*\s*\([^)]*uint256\s+(\w+)[^)]*\)[^{]*{[^}]*transferFrom\s*\([^,]+,\s*address\(this\),\s*\1\)[^}]*(?:balanceOf\[msg\.sender\]|\w+Shares\[msg\.sender\])\s*\+=\s*\1", source_text)
