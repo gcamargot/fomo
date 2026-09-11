@@ -25,6 +25,7 @@ _stop_all() {
     pkill -f "dormant_monitor_daemon.py" 2>/dev/null || true
     pkill -f "factory_listener.py" 2>/dev/null || true
     pkill -f "event_log_watcher.py" 2>/dev/null || true
+    pkill -f "http_api.py" 2>/dev/null || true
 }
 
 case "$1" in
@@ -34,6 +35,7 @@ case "$1" in
         _start_one dormant "python3 -u dormant_monitor_daemon.py --daemon --interval $INTERVAL_DORMANT" dormant_watcher.log
         _start_one factory "python3 -u factory_listener.py --daemon --interval $INTERVAL_FACTORY" factory_listener.log
         _start_one logs "python3 -u event_log_watcher.py --daemon --interval $INTERVAL_LOGS" event_log_watcher.log
+        _start_one api "python3 -u http_api.py --bind 0.0.0.0 --port 8787" http_api.log
         sleep 1
         echo "✓ Daemons launched! Use './manage_daemons.sh status' or './manage_daemons.sh logs'"
         ;;
@@ -52,7 +54,7 @@ case "$1" in
         ;;
     status)
         echo "📊 === DAEMON STATUS ==="
-        for spec in "Token Scanner:token_scanner_daemon.py" "Dormant/Watchlist:dormant_monitor_daemon.py" "Factory listener:factory_listener.py" "Log watcher:event_log_watcher.py"; do
+        for spec in "Token Scanner:token_scanner_daemon.py" "Dormant/Watchlist:dormant_monitor_daemon.py" "Factory listener:factory_listener.py" "Log watcher:event_log_watcher.py" "HTTP API:http_api.py"; do
             label="${spec%%:*}"
             pat="${spec##*:}"
             pids=$(pgrep -f "$pat" || true)
