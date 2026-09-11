@@ -1713,6 +1713,31 @@ class StaticVulnerabilityAuditor:
                 "snippet": snippet,
             })
 
+        # 6c. Euler-style donate that credits balances without a health/solvency check
+        donate_m = re.search(
+            r"function\s+donate(?:ToReserves)?\s*\([^)]*\)\s*(?:external|public)",
+            source_text,
+        )
+        if (
+            donate_m
+            and "health" not in source_text.lower()
+            and "liquiditystatus" not in source_text.lower()
+            and "interface " not in source_text[max(0, donate_m.start() - 80): donate_m.start()]
+            and StaticVulnerabilityAuditor._header_lacks_auth(source_text, donate_m)
+        ):
+            findings["has_vault_inflation"] = True
+            snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, donate_m.start())
+            evidence_list.append({
+                "type": "EULER_DONATE_UNCHECKED",
+                "user_exploitable": True,
+                "title": "donate() sin chequeo de health/solvencia (Euler-style)",
+                "severity": "HIGH",
+                "exploiter": "Usuario con eToken / subcuenta",
+                "victim": "Reservas / otros prestatarios",
+                "payoff": "Mover balances internos y dejar deuda descubierta.",
+                "snippet": snippet,
+            })
+
         # 7. Fee-on-Transfer Invariant Violation
         fot_match = re.search(r"function\s+deposit\w*\s*\([^)]*uint256\s+(\w+)[^)]*\)[^{]*{[^}]*transferFrom\s*\([^,]+,\s*address\(this\),\s*\1\)[^}]*(?:balanceOf\[msg\.sender\]|\w+Shares\[msg\.sender\])\s*\+=\s*\1", source_text)
         if fot_match and "balanceBefore" not in source_text:
@@ -1755,8 +1780,10 @@ class StaticVulnerabilityAuditor:
         # 9. Unconstrained Arbitrary Call
         arb_call_match = re.search(
             r"function\s+\w+\s*\([^)]*address\s+(\w+)[^)]*\)\s*(?:external|public)"
-            r"(?![^{]{0,240}(?:onlyOwner|onlyRole))[^{]{0,500}\.(?:call|delegatecall)\s*\(",
+            r"(?![^{]{0,240}(?:onlyOwner|onlyRole))[^{]*\{.{0,800}?"
+            r"(?:\.(?:call|delegatecall)\s*\(|transferFrom\s*\(\s*(?:swapData\.)?(?:from|account|user|owner)\b)",
             source_text,
+            re.DOTALL,
         )
         if arb_call_match and StaticVulnerabilityAuditor._header_lacks_auth(source_text, arb_call_match):
             findings["has_arbitrary_call"] = True
@@ -1791,8 +1818,10 @@ class StaticVulnerabilityAuditor:
 
         # 11. Checks-Effects-Interactions Violation Reentrancy
         reentrancy_match = re.search(
-            r"(?:msg\.sender|recipient|to)\.call\{value:[^}]*\}\(\"\"\)[^;]*;[\s\n]*(?:balanceOf|balances)\[",
-            source_text
+            r"(?:\.call\{value:[^}]*\}|\.withdraw\s*\([^)]*\)|\.harvest\s*\([^)]*\))"
+            r"[^;]*;.{0,240}?(?:balanceOf|balances|pending|rewards)\[",
+            source_text,
+            re.DOTALL,
         )
         if reentrancy_match and "nonReentrant" not in source_text:
             findings["has_reentrancy_flaw"] = True
