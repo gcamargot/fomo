@@ -1149,7 +1149,16 @@ class OnChainStateVerifier:
                     assets = 0
                     asset_addr = ""
                     try:
-                        raw_asset = w3.eth.call({"to": c_addr, "data": w3.keccak(text="asset()")[:4]})
+                        raw_asset = None
+                        for sig in ("asset()", "underlying()"):
+                            try:
+                                raw_asset = w3.eth.call(
+                                    {"to": c_addr, "data": w3.keccak(text=sig)[:4]}
+                                )
+                                if raw_asset:
+                                    break
+                            except Exception:
+                                continue
                         asset_addr = w3.to_checksum_address("0x" + raw_asset[-20:].hex())
                         raw_ab = w3.eth.call({
                             "to": asset_addr,
@@ -1305,12 +1314,36 @@ class OnChainStateVerifier:
                     status_notes.append("REFLECTION_DORMANT_ZERO_LIQUIDITY")
 
             elif vtype == "UNCONSTRAINED_ARBITRARY_CALL":
+                # Dexible-style: profit is victim allowances, not the router.
+                # Only confirm if the *router* itself holds extractable ETH.
                 if eth_balance > 0.0:
                     exp["onchain_evidence"] = f"Funded target ({eth_balance:.4f} ETH) with user-supplied call/delegatecall"
                     confirmed_exploits.append(exp)
                     status_notes.append("ARBITRARY_CALL_FUNDED")
                 else:
                     status_notes.append("ARBITRARY_CALL_ZERO_BALANCE")
+
+            elif vtype == "EULER_DONATE_UNCHECKED":
+                zeros = (0).to_bytes(32, "big") * 2
+                probe = OnChainStateVerifier.probe_unauth_selector(
+                    w3, c_addr, "donate(uint256,uint256)", args_data=zeros
+                )
+                if probe not in ("success", "auth"):
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, c_addr, "donate(uint256)", args_data=(0).to_bytes(32, "big")
+                    )
+                if probe == "auth":
+                    status_notes.append("EULER_DONATE_AUTH_REVERTED")
+                elif probe == "success" and eth_balance >= 0.05:
+                    exp["onchain_evidence"] = (
+                        f"donate() unauth success; native={eth_balance:.4f} ETH"
+                    )
+                    confirmed_exploits.append(exp)
+                    status_notes.append("EULER_DONATE_CALLABLE")
+                elif probe == "success":
+                    status_notes.append("EULER_DONATE_CALLABLE_UNFUNDED")
+                else:
+                    status_notes.append("EULER_DONATE_REVERT_OR_UNKNOWN")
 
             elif vtype == "TX_ORIGIN_AUTH":
                 exp["onchain_evidence"] = (
@@ -1342,9 +1375,8 @@ class OnChainStateVerifier:
                 if any(h in source_text for h in SAFE_HINTS):
                     status_notes.append("PERMIT_SAFE_SKIP")
                 else:
-                    exp["onchain_evidence"] = "permit() implementation without nonces[] / _useNonce"
-                    confirmed_exploits.append(exp)
-                    status_notes.append("PERMIT_NO_NONCE_PRESENT")
+                    # Replay needs a victim signature in the mempool; we don't watch it.
+                    status_notes.append("PERMIT_STATIC_ONLY_NO_MEMPOOL")
 
             elif vtype == "MULTICALL_MSGVALUE_REUSE":
                 # Pattern alone is not live-exploitable without ETH at stake on
@@ -1713,6 +1745,31 @@ class StaticVulnerabilityAuditor:
                 "snippet": snippet,
             })
 
+        # 6c. Euler-style donate that credits balances without a health/solvency check
+        donate_m = re.search(
+            r"function\s+donate(?:ToReserves)?\s*\([^)]*\)\s*(?:external|public)",
+            source_text,
+        )
+        if (
+            donate_m
+            and "health" not in source_text.lower()
+            and "liquiditystatus" not in source_text.lower()
+            and "interface " not in source_text[max(0, donate_m.start() - 80): donate_m.start()]
+            and StaticVulnerabilityAuditor._header_lacks_auth(source_text, donate_m)
+        ):
+            findings["has_vault_inflation"] = True
+            snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, donate_m.start())
+            evidence_list.append({
+                "type": "EULER_DONATE_UNCHECKED",
+                "user_exploitable": True,
+                "title": "donate() sin chequeo de health/solvencia (Euler-style)",
+                "severity": "HIGH",
+                "exploiter": "Usuario con eToken / subcuenta",
+                "victim": "Reservas / otros prestatarios",
+                "payoff": "Mover balances internos y dejar deuda descubierta.",
+                "snippet": snippet,
+            })
+
         # 7. Fee-on-Transfer Invariant Violation
         fot_match = re.search(r"function\s+deposit\w*\s*\([^)]*uint256\s+(\w+)[^)]*\)[^{]*{[^}]*transferFrom\s*\([^,]+,\s*address\(this\),\s*\1\)[^}]*(?:balanceOf\[msg\.sender\]|\w+Shares\[msg\.sender\])\s*\+=\s*\1", source_text)
         if fot_match and "balanceBefore" not in source_text:
@@ -1755,8 +1812,10 @@ class StaticVulnerabilityAuditor:
         # 9. Unconstrained Arbitrary Call
         arb_call_match = re.search(
             r"function\s+\w+\s*\([^)]*address\s+(\w+)[^)]*\)\s*(?:external|public)"
-            r"(?![^{]{0,240}(?:onlyOwner|onlyRole))[^{]{0,500}\.(?:call|delegatecall)\s*\(",
+            r"(?![^{]{0,240}(?:onlyOwner|onlyRole))[^{]*\{.{0,800}?"
+            r"(?:\.(?:call|delegatecall)\s*\(|transferFrom\s*\(\s*(?:swapData\.)?(?:from|account|user|owner)\b)",
             source_text,
+            re.DOTALL,
         )
         if arb_call_match and StaticVulnerabilityAuditor._header_lacks_auth(source_text, arb_call_match):
             findings["has_arbitrary_call"] = True
@@ -1791,8 +1850,10 @@ class StaticVulnerabilityAuditor:
 
         # 11. Checks-Effects-Interactions Violation Reentrancy
         reentrancy_match = re.search(
-            r"(?:msg\.sender|recipient|to)\.call\{value:[^}]*\}\(\"\"\)[^;]*;[\s\n]*(?:balanceOf|balances)\[",
-            source_text
+            r"(?:\.call\{value:[^}]*\}|\.withdraw\s*\([^)]*\)|\.harvest\s*\([^)]*\))"
+            r"[^;]*;.{0,240}?(?:balanceOf|balances|pending|rewards)\[",
+            source_text,
+            re.DOTALL,
         )
         if reentrancy_match and "nonReentrant" not in source_text:
             findings["has_reentrancy_flaw"] = True

@@ -11,6 +11,10 @@ Citations:
 - Curve/Yearn read-only reentrancy (get_virtual_price in a view used by deposit)
 - Kyber Elastic tick-boundary mint, Nov 2023 (~$48M)
 - FlashDeFier / Warp-style spot AMM: getReserves used as collateral price
+- Fei Rari ETH CEI (2022); Penpie harvest callback (2024)
+- Euler donate without health (2023)
+- Dexible aggregator `transferFrom(from)` (2023)
+- Tax-token public swapBack; EIP-2612 permit without nonce
 """
 
 from token_scanner_daemon import StaticVulnerabilityAuditor
@@ -139,3 +143,106 @@ def test_replay_spot_amm_oracle_lending():
 
 def test_replay_oz_virtual_offset_is_negative():
     assert "ERC4626_INFLATION_ATTACK" not in _types(OZ_VIRTUAL_OFFSET)
+
+
+# Fei Rari / classic ETH CEI (2022): send value then update balances.
+FEI_RARI_ETH_REENTRANCY = """
+contract EthPool {
+    mapping(address => uint256) public balances;
+    function withdraw(uint256 amount) external {
+        require(balances[msg.sender] >= amount);
+        (bool ok,) = msg.sender.call{value: amount}("");
+        require(ok);
+        balances[msg.sender] -= amount;
+    }
+}
+"""
+
+# Penpie (2024): harvest/withdraw callback before zeroing pending rewards.
+PENPIE_HARVEST_REENTRANCY = """
+contract PendleStaking {
+    mapping(address => uint256) public pending;
+    function harvest() public {
+        uint256 amt = pending[msg.sender];
+        IPool(pool).withdraw(amt);
+        pending[msg.sender] = 0;
+    }
+}
+"""
+
+# Euler donate (2023): credit eToken without a solvency/health check.
+EULER_DONATE = """
+contract EToken {
+    function donateToReserves(uint subAccountId, uint amount) external {
+        require(amount <= MAX_SANE_AMOUNT);
+        eTokenBalance[msg.sender] -= amount;
+        reserveBalance += amount;
+    }
+    function donate(uint subAccountId, uint amount) external {
+        increaseBalance(msg.sender, amount);
+    }
+}
+"""
+
+# Dexible (2023): aggregator swap uses caller-supplied `from` in transferFrom.
+DEXIBLE_ARBITRARY_FROM = """
+contract DexibleRouter {
+    function simpleSwap(address from, address token, uint256 amount, bytes calldata data)
+        public payable
+    {
+        IERC20(token).transferFrom(from, address(this), amount);
+        (bool ok,) = router.call(data);
+        require(ok);
+    }
+}
+"""
+
+# Tax token public swapBack (sandwich trigger we already hunt).
+TAX_TOKEN_SWAPBACK = """
+contract TaxToken {
+    function swapBack() public {
+        uint256 bal = balanceOf(address(this));
+        _swapTokensForETH(bal);
+    }
+}
+"""
+
+# EIP-2612 permit without nonce increment (mempool replay).
+PERMIT_NO_NONCE = """
+contract Token {
+    function permit(address owner, address spender, uint256 value, uint256 deadline,
+        uint8 v, bytes32 r, bytes32 s) public {
+        require(deadline >= block.timestamp);
+        bytes32 hash = keccak256(abi.encode(owner, spender, value, deadline));
+        address signer = ecrecover(hash, v, r, s);
+        require(signer == owner);
+        allowance[owner][spender] = value;
+    }
+}
+"""
+
+
+def test_replay_fei_rari_eth_reentrancy():
+    assert "CHECKS_EFFECTS_REENTRANCY" in _types(FEI_RARI_ETH_REENTRANCY)
+
+
+def test_replay_penpie_harvest_reentrancy():
+    assert "CHECKS_EFFECTS_REENTRANCY" in _types(PENPIE_HARVEST_REENTRANCY)
+
+
+def test_replay_euler_donate():
+    types = _types(EULER_DONATE)
+    assert "EULER_DONATE_UNCHECKED" in types or "ERC4626_INFLATION_ATTACK" in types
+
+
+def test_replay_dexible_arbitrary_from():
+    types = _types(DEXIBLE_ARBITRARY_FROM)
+    assert "UNCONSTRAINED_ARBITRARY_CALL" in types or "DEXIBLE_ARBITRARY_FROM" in types
+
+
+def test_replay_tax_token_public_swapback():
+    assert "PUBLIC_SWAPBACK_TRIGGER" in _types(TAX_TOKEN_SWAPBACK)
+
+
+def test_replay_permit_without_nonce():
+    assert "PERMIT_NO_NONCE" in _types(PERMIT_NO_NONCE)
