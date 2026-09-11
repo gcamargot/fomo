@@ -1223,6 +1223,37 @@ class OnChainStateVerifier:
                 else:
                     status_notes.append("REENTRANCY_EMPTY_BALANCE")
 
+            elif vtype == "READ_ONLY_REENTRANCY":
+                from factory_listener import erc20_balance_raw
+                from profit_estimator import estimate_native_drain_profit
+
+                vault_hints = LENDING_HINTS + ("totalAssets", "previewDeposit", "convertToShares")
+                if not any(h in source_text for h in vault_hints):
+                    status_notes.append("ROR_NO_VAULT_HINTS")
+                else:
+                    asset_eth = float(eth_balance or 0.0)
+                    cfg = DEX_CONFIG.get((chain or "").lower()) or {}
+                    weth = str(cfg.get("weth") or "")
+                    if weth:
+                        try:
+                            asset_eth += erc20_balance_raw(w3, weth, c_addr) / 1e18
+                        except Exception:
+                            pass
+                    est = estimate_native_drain_profit(asset_eth)
+                    if est.actionable:
+                        exp["_asset_eth"] = asset_eth
+                        exp["onchain_evidence"] = (
+                            f"Read-only reentrancy vault asset_eth={asset_eth:.4f} "
+                            f"profit={est.expected_profit_eth:.4f}"
+                        )
+                        confirmed_exploits.append(exp)
+                        status_notes.append("ROR_CALLABLE")
+                    else:
+                        status_notes.append(f"ROR_UNFUNDED_{asset_eth:.4f}ETH")
+
+            elif vtype == "CLMM_TICK_ROUNDING":
+                status_notes.append("CLMM_TICK_STATIC_ONLY")
+
             elif vtype == "SPOT_ORACLE_MANIPULATION":
                 from profit_estimator import estimate_spot_oracle_profit
 
@@ -1757,6 +1788,87 @@ class StaticVulnerabilityAuditor:
                 "snippet": snippet
             })
 
+        # 11b. Read-only reentrancy: view virtual price used by deposit/borrow, no lock
+        ror_view = re.search(
+            r"function\s+\w+\s*\([^)]*\)[^{]{0,160}\bview\b[^{]*\{.{0,1600}?"
+            r"(?:get_virtual_price|getVirtualPrice)\s*\(",
+            source_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        ror_writer = re.search(
+            r"function\s+(deposit|mint|borrow|liquidate|withdraw)\s*\([^)]*\)\s*"
+            r"(?:public|external)",
+            source_text,
+            re.IGNORECASE,
+        )
+        ror_uses = re.search(
+            r"totalAssets\s*\(|convertToShares\s*\(|get_virtual_price\s*\(|getVirtualPrice\s*\(",
+            source_text,
+            re.IGNORECASE,
+        )
+        ror_locked = re.search(
+            r"nonReentrant(?:View)?|ReentrancyGuard|\b_lock\b",
+            source_text,
+        )
+        if (
+            ror_view
+            and ror_writer
+            and ror_uses
+            and not ror_locked
+            and "interface " not in source_text[max(0, ror_view.start() - 80): ror_view.start()]
+            and "latestRoundData" not in source_text
+            and "observe(" not in source_text
+        ):
+            findings["has_reentrancy_flaw"] = True
+            snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, ror_view.start())
+            evidence_list.append({
+                "type": "READ_ONLY_REENTRANCY",
+                "user_exploitable": True,
+                "title": "Read-only reentrancy: view de precio sin lock en deposit/borrow",
+                "severity": "HIGH",
+                "exploiter": "Callback de add/remove liquidity (Curve-like)",
+                "victim": "Vault / mercado que cotiza LP con get_virtual_price",
+                "payoff": "Mint extra o deuda subcolateralizada mientras el view está stale.",
+                "snippet": snippet,
+            })
+
+        # 11c. CLMM tick rounding / ghost liquidity (inventory only until V3 PnL exists)
+        looks_clmm = any(
+            s in source_text
+            for s in ("sqrtPriceX96", "TickMath", "getSqrtRatioAtTick", "tickSpacing")
+        )
+        clmm_mint = re.search(
+            r"function\s+(mint|addLiquidity|modifyLiquidity|modifyPosition)\s*\([^)]*\)\s*"
+            r"(?:public|external)",
+            source_text,
+            re.IGNORECASE,
+        )
+        if looks_clmm and clmm_mint:
+            prefix = source_text[max(0, clmm_mint.start() - 80): clmm_mint.start()]
+            window = source_text[clmm_mint.start(): clmm_mint.start() + 900]
+            zero_min = re.search(r"amount[01]Min\s*=\s*0\b|amount[01]Min:\s*0\b", window)
+            zero_amt = re.search(r"amount[01]\s*==\s*0", window)
+            unchecked_tick = "unchecked" in window and (
+                "tick" in window.lower() or "liquidity" in window.lower()
+            )
+            if (
+                "interface " not in prefix
+                and StaticVulnerabilityAuditor._header_lacks_auth(source_text, clmm_mint)
+                and (zero_min or zero_amt or unchecked_tick)
+            ):
+                evidence_list.append({
+                    "type": "CLMM_TICK_ROUNDING",
+                    "user_exploitable": True,
+                    "title": "CLMM mint con amountMin=0 / tick rounding (sin modelo de profit)",
+                    "severity": "MEDIUM",
+                    "exploiter": "LP en tick boundary (Kyber/Algebra-style)",
+                    "victim": "LPs del pool concentrado",
+                    "payoff": "Ghost liquidity; PnL no modelado en v1 (no triage).",
+                    "snippet": StaticVulnerabilityAuditor._extract_snippet(
+                        source_text, clmm_mint.start()
+                    ),
+                })
+
         # 12. Unprotected Proxy Initializer Hijack
         init_match = re.search(r"function\s+initialize\s*\([^)]*\)\s*(?:public|external)(?![^{;]*(?:initializer|onlyInitializing|onlyOwner))[^{;]*{", source_text)
         if init_match:
@@ -1795,7 +1907,7 @@ class StaticVulnerabilityAuditor:
             evidence_list.append({
                 "type": "SPOT_ORACLE_MANIPULATION",
                 "user_exploitable": True,
-                "title": "Dependencia de Oráculo Spot / Read-Only Reentrancy en Préstamos",
+                "title": "Dependencia de Oráculo Spot AMM en préstamos",
                 "severity": "HIGH",
                 "exploiter": "Prestatario con Flash Loan",
                 "victim": "Pool de Préstamos / Protocolo Lending",

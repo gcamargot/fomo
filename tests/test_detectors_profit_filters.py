@@ -96,6 +96,63 @@ def test_interface_collect_is_ignored():
     assert "V3_COLLECT_UNPROTECTED" not in _types(src)
 
 
+def test_read_only_reentrancy_view_virtual_price_flags():
+    src = """
+    contract Vault {
+        function totalAssets() public view returns (uint256) {
+            return pool.get_virtual_price() * lp.balanceOf(address(this)) / 1e18;
+        }
+        function deposit(uint256 assets) external {
+            uint256 shares = assets * totalSupply() / totalAssets();
+            _mint(msg.sender, shares);
+        }
+    }
+    """
+    assert "READ_ONLY_REENTRANCY" in _types(src)
+
+
+def test_read_only_reentrancy_with_guard_is_ignored():
+    src = """
+    contract Vault is ReentrancyGuard {
+        function totalAssets() public view returns (uint256) {
+            return pool.get_virtual_price();
+        }
+        function deposit(uint256 assets) external nonReentrant {
+            uint256 shares = convertToShares(assets);
+            _mint(msg.sender, shares);
+        }
+    }
+    """
+    assert "READ_ONLY_REENTRANCY" not in _types(src)
+
+
+def test_clmm_mint_amount_min_zero_flags():
+    src = """
+    contract Pool {
+        uint160 sqrtPriceX96;
+        int24 tickSpacing;
+        function mint(address recipient, int24 tickLower, int24 tickUpper,
+            uint128 amount, bytes calldata data) external returns (uint256 a0, uint256 a1) {
+            amount0Min = 0;
+            amount1Min = 0;
+            _modifyPosition(tickLower, tickUpper, amount);
+        }
+    }
+    """
+    assert "CLMM_TICK_ROUNDING" in _types(src)
+
+
+def test_clmm_interface_is_ignored():
+    src = """
+    interface IUniswapV3Pool {
+        function mint(address recipient, int24 tickLower, int24 tickUpper,
+            uint128 amount, bytes calldata data) external returns (uint256, uint256);
+        function slot0() external view returns (uint160 sqrtPriceX96, int24 tick);
+    }
+    """
+    assert "CLMM_TICK_ROUNDING" not in _types(src)
+
+
 def test_v4_hook_after_swap_without_pool_manager_flags():
     src = """
     contract GreedyHook {

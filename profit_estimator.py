@@ -19,6 +19,8 @@ SKIM_TYPES = frozenset({"PAIR_SKIM"})
 COLLECT_TYPES = frozenset({"V3_COLLECT_UNPROTECTED"})
 SPOT_ORACLE_TYPES = frozenset({"SPOT_ORACLE_MANIPULATION"})
 INFLATION_TYPES = frozenset({"ERC4626_INFLATION_ATTACK"})
+ROR_TYPES = frozenset({"READ_ONLY_REENTRANCY"})
+UNMODELED_TYPES = frozenset({"CLMM_TICK_ROUNDING"})
 AAVE_V3_FLASH_FEE = 0.0005
 NATIVE_DRAIN_TYPES = frozenset({
     "BROKEN_ACCESS_CONTROL",
@@ -447,6 +449,21 @@ def apply_profit_gate(
             else:
                 notes.append(
                     f"PROFIT_BELOW_THRESHOLD_COLLECT_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in UNMODELED_TYPES:
+            notes.append("PROFIT_UNMODELED_CLMM")
+        elif vtype in ROR_TYPES:
+            last = estimate_native_drain_profit(
+                float(exp.get("_asset_eth") or eth_balance or 0.0),
+                erc20_eth_equiv=0.0,
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_ROR_{last.expected_profit_eth:.4f}ETH"
                 )
         elif vtype in INFLATION_TYPES:
             last = estimate_vault_inflation_profit(

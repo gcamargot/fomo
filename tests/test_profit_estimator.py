@@ -298,6 +298,28 @@ def test_vault_inflation_already_seeded_fails():
     assert est.actionable is False
 
 
+def test_profit_gate_ror_uses_asset_eth():
+    confirmed = [{"type": "READ_ONLY_REENTRANCY", "_asset_eth": 1.0}]
+    kept, notes, est = apply_profit_gate(confirmed, eth_balance=0.0)
+    assert kept == confirmed
+    assert est is not None and est.actionable is True
+    assert notes == []
+
+
+def test_profit_gate_ror_dust_drops():
+    confirmed = [{"type": "READ_ONLY_REENTRANCY", "_asset_eth": 0.01}]
+    kept, notes, est = apply_profit_gate(confirmed, eth_balance=0.0)
+    assert kept == []
+    assert any("ROR" in n for n in notes)
+
+
+def test_profit_gate_clmm_never_keeps():
+    confirmed = [{"type": "CLMM_TICK_ROUNDING"}]
+    kept, notes, _est = apply_profit_gate(confirmed, eth_balance=10.0, pool_eth=10.0)
+    assert kept == []
+    assert any("UNMODELED_CLMM" in n for n in notes)
+
+
 def test_profit_gate_vault_inflation_uses_asset_eth():
     confirmed = [{"type": "ERC4626_INFLATION_ATTACK", "_asset_eth": 1.0}]
     kept, notes, est = apply_profit_gate(
