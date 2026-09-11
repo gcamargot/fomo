@@ -96,6 +96,76 @@ def test_interface_collect_is_ignored():
     assert "V3_COLLECT_UNPROTECTED" not in _types(src)
 
 
+def test_v4_hook_after_swap_without_pool_manager_flags():
+    src = """
+    contract GreedyHook {
+        function afterSwap(address sender, PoolKey calldata key,
+            SwapParams calldata params, int256 delta, bytes calldata data)
+            external returns (bytes4, int128) {
+            return (this.afterSwap.selector, 0);
+        }
+    }
+    """
+    assert "V4_HOOK_UNPROTECTED" in _types(src)
+
+
+def test_v4_hook_with_pool_manager_is_ignored():
+    src = """
+    contract HonestHook is BaseHook {
+        function afterSwap(address sender, PoolKey calldata key,
+            SwapParams calldata params, int256 delta, bytes calldata data)
+            external onlyPoolManager returns (bytes4, int128) {
+            return (IHooks.afterSwap.selector, 0);
+        }
+    }
+    """
+    assert "V4_HOOK_UNPROTECTED" not in _types(src)
+
+
+def test_v4_hooks_interface_is_ignored():
+    src = """
+    interface IHooks {
+        function afterSwap(address sender, PoolKey calldata key,
+            SwapParams calldata params, int256 delta, bytes calldata data)
+            external returns (bytes4, int128);
+    }
+    """
+    assert "V4_HOOK_UNPROTECTED" not in _types(src)
+
+
+def test_v4_hook_probe_plan_encodes_after_swap():
+    from token_scanner_daemon import OnChainStateVerifier
+    src = """
+    function afterSwap(address sender, PoolKey calldata key,
+        SwapParams calldata params, int256 delta, bytes calldata data)
+        external returns (bytes4, int128) { }
+    """
+    plan = OnChainStateVerifier.v4_hook_probe_plan(src)
+    assert plan is not None
+    sig, args = plan
+    assert sig.startswith("afterSwap(")
+    assert len(args) > 64
+
+
+def test_v4_hook_gate_confirms_only_success():
+    from token_scanner_daemon import OnChainStateVerifier
+    ok, note = OnChainStateVerifier.v4_hook_gate("success", 0.0)
+    assert ok is True
+    assert note == "V4_HOOK_CALLABLE"
+    ok, note = OnChainStateVerifier.v4_hook_gate("revert", 1.5)
+    assert ok is False
+
+
+def test_profit_gate_v4_hook_uses_native():
+    from profit_estimator import apply_profit_gate
+    kept, notes, est = apply_profit_gate(
+        [{"type": "V4_HOOK_UNPROTECTED"}],
+        eth_balance=0.2,
+    )
+    assert len(kept) == 1
+    assert est is not None and est.actionable is True
+
+
 def test_erc4626_share_formula_without_virtual_flags():
     src = """
     contract Vault is ERC4626 {
