@@ -1,6 +1,11 @@
 """Log watcher cycle advances cursor and enqueues swap tokens."""
 
-from event_log_watcher import SWAP_TOPIC0, run_log_watch_cycle
+from event_log_watcher import (
+    MARKET_LISTED_TOPIC0,
+    SWAP_TOPIC0,
+    ctokens_from_market_listed,
+    run_log_watch_cycle,
+)
 from log_sync import cursor_key
 from token_scanner_daemon import TokenScannerDB
 
@@ -54,3 +59,45 @@ def test_log_cycle_empty_still_moves_cursor(tmp_path):
     )
     assert n == 0
     assert db.get_cursor(cursor_key("base", PAIR, "Swap")) == 30
+
+
+COMPTROLLER = "0x3333333333333333333333333333333333333333"
+CTOKEN = "0x4444444444444444444444444444444444444444"
+
+
+def test_ctokens_from_market_listed_reads_data():
+    logs = [
+        {
+            "address": COMPTROLLER,
+            "topics": [MARKET_LISTED_TOPIC0],
+            "data": "0x" + CTOKEN[2:].rjust(64, "0"),
+        }
+    ]
+    assert ctokens_from_market_listed(logs, [COMPTROLLER]) == [CTOKEN]
+
+
+def test_log_cycle_market_listed_enqueues_ctoken(tmp_path):
+    db = TokenScannerDB(str(tmp_path / "t.db"))
+    woken = []
+    w3 = _W3(
+        head=90,
+        logs=[
+            {
+                "address": COMPTROLLER,
+                "topics": [MARKET_LISTED_TOPIC0],
+                "data": "0x" + CTOKEN[2:].rjust(64, "0"),
+            }
+        ],
+    )
+    n = run_log_watch_cycle(
+        db,
+        {"base": w3},
+        pair_to_token_by_chain={},
+        liq_pools_by_chain={},
+        lookback=20,
+        comptrollers_by_chain={"base": [COMPTROLLER]},
+        on_market_listed=lambda chain, tok: woken.append((chain, tok)),
+    )
+    assert n == 1
+    assert woken == [("base", CTOKEN)]
+    assert db.get_cursor(cursor_key("base", COMPTROLLER, "MarketListed")) == 90

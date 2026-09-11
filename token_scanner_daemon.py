@@ -1149,7 +1149,16 @@ class OnChainStateVerifier:
                     assets = 0
                     asset_addr = ""
                     try:
-                        raw_asset = w3.eth.call({"to": c_addr, "data": w3.keccak(text="asset()")[:4]})
+                        raw_asset = None
+                        for sig in ("asset()", "underlying()"):
+                            try:
+                                raw_asset = w3.eth.call(
+                                    {"to": c_addr, "data": w3.keccak(text=sig)[:4]}
+                                )
+                                if raw_asset:
+                                    break
+                            except Exception:
+                                continue
                         asset_addr = w3.to_checksum_address("0x" + raw_asset[-20:].hex())
                         raw_ab = w3.eth.call({
                             "to": asset_addr,
@@ -1305,12 +1314,36 @@ class OnChainStateVerifier:
                     status_notes.append("REFLECTION_DORMANT_ZERO_LIQUIDITY")
 
             elif vtype == "UNCONSTRAINED_ARBITRARY_CALL":
+                # Dexible-style: profit is victim allowances, not the router.
+                # Only confirm if the *router* itself holds extractable ETH.
                 if eth_balance > 0.0:
                     exp["onchain_evidence"] = f"Funded target ({eth_balance:.4f} ETH) with user-supplied call/delegatecall"
                     confirmed_exploits.append(exp)
                     status_notes.append("ARBITRARY_CALL_FUNDED")
                 else:
                     status_notes.append("ARBITRARY_CALL_ZERO_BALANCE")
+
+            elif vtype == "EULER_DONATE_UNCHECKED":
+                zeros = (0).to_bytes(32, "big") * 2
+                probe = OnChainStateVerifier.probe_unauth_selector(
+                    w3, c_addr, "donate(uint256,uint256)", args_data=zeros
+                )
+                if probe not in ("success", "auth"):
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, c_addr, "donate(uint256)", args_data=(0).to_bytes(32, "big")
+                    )
+                if probe == "auth":
+                    status_notes.append("EULER_DONATE_AUTH_REVERTED")
+                elif probe == "success" and eth_balance >= 0.05:
+                    exp["onchain_evidence"] = (
+                        f"donate() unauth success; native={eth_balance:.4f} ETH"
+                    )
+                    confirmed_exploits.append(exp)
+                    status_notes.append("EULER_DONATE_CALLABLE")
+                elif probe == "success":
+                    status_notes.append("EULER_DONATE_CALLABLE_UNFUNDED")
+                else:
+                    status_notes.append("EULER_DONATE_REVERT_OR_UNKNOWN")
 
             elif vtype == "TX_ORIGIN_AUTH":
                 exp["onchain_evidence"] = (
@@ -1342,9 +1375,8 @@ class OnChainStateVerifier:
                 if any(h in source_text for h in SAFE_HINTS):
                     status_notes.append("PERMIT_SAFE_SKIP")
                 else:
-                    exp["onchain_evidence"] = "permit() implementation without nonces[] / _useNonce"
-                    confirmed_exploits.append(exp)
-                    status_notes.append("PERMIT_NO_NONCE_PRESENT")
+                    # Replay needs a victim signature in the mempool; we don't watch it.
+                    status_notes.append("PERMIT_STATIC_ONLY_NO_MEMPOOL")
 
             elif vtype == "MULTICALL_MSGVALUE_REUSE":
                 # Pattern alone is not live-exploitable without ETH at stake on

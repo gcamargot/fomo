@@ -19,10 +19,16 @@ if Web3 is not None:
     AAVE_V3_LIQ_TOPIC0 = "0x" + Web3.keccak(
         text="LiquidationCall(address,address,address,uint256,uint256,address,bool)"
     ).hex().replace("0x", "")
+    MARKET_LISTED_TOPIC0 = "0x" + Web3.keccak(
+        text="MarketListed(address)"
+    ).hex().replace("0x", "")
 else:
     SWAP_TOPIC0 = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
     AAVE_V3_LIQ_TOPIC0 = (
         "0xe413a321e8681d831f4dbccbca790d2952b56f977908e45be373350091fba3"
+    )
+    MARKET_LISTED_TOPIC0 = (
+        "0xcf583bb0c569eb967f806b11601c4cb93c10310485c67add5f8362c2f212321f"
     )
 
 
@@ -39,6 +45,13 @@ AAVE_V3_POOLS: Dict[str, List[str]] = {
     "ethereum": ["0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2"],
     "base": ["0xa238dd80c259a72e81d7e4664a9801593f98d1c5"],
     "arbitrum": ["0x794a61358d6845594f94dc1db02a252b5b4814ad"],
+}
+
+# Compound V2-style Comptroller (MarketListed). Empty-market window = Sonne.
+COMPOUND_COMPTROLLERS: Dict[str, List[str]] = {
+    "ethereum": ["0x3d9819210a31b4961b30ef54be2aed79b9c9cd3b"],
+    "base": ["0xfbb21d0380bee3312b33c4353c8936a0f13ef26c"],  # Moonwell
+    "arbitrum": [],
 }
 
 
@@ -151,6 +164,25 @@ def tokens_from_swap_logs(
     return sorted(wanted)
 
 
+def ctokens_from_market_listed(
+    logs: Iterable[Dict[str, Any]],
+    comptrollers: Iterable[str],
+) -> List[str]:
+    """cToken addresses from Comptroller MarketListed(address) (data, not topic)."""
+    allow = {a.lower() for a in comptrollers}
+    out: List[str] = []
+    for log in logs:
+        addr = str(log.get("address") or "").lower()
+        if addr not in allow or _topic0(log) != MARKET_LISTED_TOPIC0.lower():
+            continue
+        data = str(log.get("data") or "")
+        hexdata = data[2:] if data.startswith("0x") else data
+        if len(hexdata) < 40:
+            continue
+        out.append("0x" + hexdata[-40:].lower())
+    return out
+
+
 def liquidation_hits(
     logs: Iterable[Dict[str, Any]],
     allowlisted_pools: Iterable[str],
@@ -179,6 +211,8 @@ def run_log_watch_cycle(
     max_span: int = 2000,
     on_swap_token: Optional[Callable[[str, str], None]] = None,
     on_liq_pool: Optional[Callable[[str, str], None]] = None,
+    comptrollers_by_chain: Optional[Mapping[str, Iterable[str]]] = None,
+    on_market_listed: Optional[Callable[[str, str], None]] = None,
 ) -> int:
     from log_sync import chunk_block_range, cursor_key, next_cursor, normalize_log
 
@@ -252,6 +286,41 @@ def run_log_watch_cycle(
                         on_liq_pool(chain, addr)
                 db.set_cursor(key, next_cursor(last, end))
                 last = end
+
+    for chain, comps in (comptrollers_by_chain or {}).items():
+        w3 = clients.get(chain)
+        comp_list = [c for c in comps]
+        if not w3 or not comp_list:
+            continue
+        try:
+            head = int(w3.eth.block_number)
+        except Exception:
+            continue
+        for comp in comp_list:
+            key = cursor_key(chain, comp, "MarketListed")
+            last = db.get_cursor(key, default=max(0, head - lookback))
+            frm = last + 1
+            if frm > head:
+                continue
+            for start, end in chunk_block_range(frm, head, max_span=max_span):
+                try:
+                    raw = w3.eth.get_logs(
+                        {
+                            "fromBlock": start,
+                            "toBlock": end,
+                            "address": comp,
+                            "topics": [MARKET_LISTED_TOPIC0],
+                        }
+                    )
+                except Exception:
+                    raw = []
+                logs = [normalize_log(x) for x in raw]
+                for ctoken in ctokens_from_market_listed(logs, [comp]):
+                    hits += 1
+                    if on_market_listed:
+                        on_market_listed(chain, ctoken)
+                db.set_cursor(key, next_cursor(last, end))
+                last = end
     return hits
 
 
@@ -297,6 +366,10 @@ def main() -> None:
             lookback=args.lookback,
             on_swap_token=lambda chain, tok: wakeup_from_swap(
                 db, chain, tok, dormant.check_and_update_contract
+            ),
+            comptrollers_by_chain=COMPOUND_COMPTROLLERS,
+            on_market_listed=lambda chain, ctok: wakeup_from_swap(
+                db, chain, ctok, dormant.check_and_update_contract
             ),
         )
         print(
