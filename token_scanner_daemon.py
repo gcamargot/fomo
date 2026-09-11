@@ -1076,10 +1076,14 @@ class OnChainStateVerifier:
                     status_notes.append("SIGNATURE_REPLAY_EMPTY_BALANCE")
 
             elif vtype == "ERC4626_INFLATION_ATTACK":
+                from profit_estimator import estimate_vault_inflation_profit, profit_to_dict as _ptd
+                from profit_estimator import xyk_amount_out
+
                 try:
                     raw_ts = w3.eth.call({"to": c_addr, "data": w3.keccak(text="totalSupply()")[:4]})
                     ts_val = int(raw_ts.hex(), 16) if raw_ts else 0
                     assets = 0
+                    asset_addr = ""
                     try:
                         raw_asset = w3.eth.call({"to": c_addr, "data": w3.keccak(text="asset()")[:4]})
                         asset_addr = w3.to_checksum_address("0x" + raw_asset[-20:].hex())
@@ -1090,14 +1094,41 @@ class OnChainStateVerifier:
                         assets = int(raw_ab.hex(), 16) if raw_ab else 0
                     except Exception:
                         assets = -1
-                    if ts_val == 0 and assets == 0:
-                        exp["onchain_evidence"] = "Vault unseeded: totalSupply=0 and asset.balanceOf(vault)=0"
-                        confirmed_exploits.append(exp)
-                        status_notes.append("VAULT_INFLATION_UNSEEDED")
-                    elif ts_val == 0:
-                        status_notes.append("VAULT_SUPPLY_ZERO_BUT_ALREADY_HAS_ASSETS")
-                    else:
+                    if ts_val != 0:
                         status_notes.append("VAULT_ALREADY_SEEDED")
+                    elif assets <= 0:
+                        # Empty unseeded: opportunity only if a victim appears later.
+                        status_notes.append("VAULT_INFLATION_UNSEEDED")
+                    else:
+                        cfg = DEX_CONFIG.get((chain or "").lower()) or {}
+                        weth = str(cfg.get("weth") or "").lower()
+                        asset_eth = 0.0
+                        if asset_addr.lower() == weth:
+                            asset_eth = assets / 1e18
+                        else:
+                            amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
+                                w3, chain, address
+                            )
+                            pe = float(amm_eval.get("eth_reserve") or 0.0)
+                            pt = float(amm_eval.get("token_reserve") or 0.0)
+                            if pe > 0 and pt > 0 and assets > 0:
+                                asset_eth = xyk_amount_out(assets / 1e18, pt, pe)
+                        est = estimate_vault_inflation_profit(
+                            total_supply_raw=ts_val, asset_eth=asset_eth
+                        )
+                        if est.actionable:
+                            exp["_asset_eth"] = asset_eth
+                            exp["profit"] = _ptd(est)
+                            exp["onchain_evidence"] = (
+                                f"Empty vault donation asset_eth={asset_eth:.4f} "
+                                f"totalSupply=0 profit={est.expected_profit_eth:.4f}"
+                            )
+                            confirmed_exploits.append(exp)
+                            status_notes.append("VAULT_INFLATION_DONATION")
+                        else:
+                            status_notes.append(
+                                f"VAULT_INFLATION_DUST_{asset_eth:.4f}ETH"
+                            )
                 except Exception:
                     status_notes.append("VAULT_PROBE_FAILED")
 
@@ -1531,7 +1562,11 @@ class StaticVulnerabilityAuditor:
 
         # 6. ERC-4626 Vault Inflation Attack
         if "ERC4626" in source_text or "totalAssets()" in source_text:
-            inflation_match = re.search(r"(?:assets|amount)\s*\*\s*(?:totalSupply|totalShares)\s*\/\s*(?:totalAssets\(\)|_totalAssets)", source_text)
+            inflation_match = re.search(
+                r"(?:assets|amount)\s*\*\s*(?:totalSupply|totalShares)\s*(?:\(\))?\s*/\s*"
+                r"(?:totalAssets\s*(?:\(\))?|_totalAssets)",
+                source_text,
+            )
             if inflation_match and "virtual" not in source_text.lower() and "_decimalsOffset" not in source_text:
                 findings["has_vault_inflation"] = True
                 snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, inflation_match.start())

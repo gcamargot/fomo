@@ -18,6 +18,7 @@ XYK_TYPES = frozenset({
 SKIM_TYPES = frozenset({"PAIR_SKIM"})
 COLLECT_TYPES = frozenset({"V3_COLLECT_UNPROTECTED"})
 SPOT_ORACLE_TYPES = frozenset({"SPOT_ORACLE_MANIPULATION"})
+INFLATION_TYPES = frozenset({"ERC4626_INFLATION_ATTACK"})
 AAVE_V3_FLASH_FEE = 0.0005
 NATIVE_DRAIN_TYPES = frozenset({
     "BROKEN_ACCESS_CONTROL",
@@ -295,6 +296,44 @@ def estimate_spot_oracle_profit(
     )
 
 
+def estimate_vault_inflation_profit(
+    *,
+    total_supply_raw: int,
+    asset_eth: float,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+) -> ProfitEstimate:
+    """First depositor takes an empty vault that already holds a donation.
+
+    Only supply==0 is user-exploitable for us (we can still be first).
+    Seeded vaults already belong to whoever minted the 1-wei share.
+    """
+    empty = ProfitEstimate(
+        expected_profit_eth=0.0,
+        pool_eth=0.0,
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="none",
+        actionable=False,
+    )
+    if int(total_supply_raw or 0) != 0:
+        return empty
+    eth = float(asset_eth or 0.0)
+    if eth <= 0:
+        return empty
+    net = max(0.0, eth - gas_eth)
+    return ProfitEstimate(
+        expected_profit_eth=net,
+        pool_eth=0.0,
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="vault_inflation",
+        actionable=net >= min_net_profit_eth,
+    )
+
+
 def estimate_native_drain_profit(
     eth_balance: float,
     *,
@@ -407,6 +446,19 @@ def apply_profit_gate(
             else:
                 notes.append(
                     f"PROFIT_BELOW_THRESHOLD_COLLECT_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in INFLATION_TYPES:
+            last = estimate_vault_inflation_profit(
+                total_supply_raw=0,
+                asset_eth=float(exp.get("_asset_eth") or erc20_eth_equiv or 0.0),
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_VAULT_{last.expected_profit_eth:.4f}ETH"
                 )
         elif vtype in SPOT_ORACLE_TYPES:
             last = estimate_spot_oracle_profit(

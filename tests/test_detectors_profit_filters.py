@@ -96,6 +96,29 @@ def test_interface_collect_is_ignored():
     assert "V3_COLLECT_UNPROTECTED" not in _types(src)
 
 
+def test_erc4626_share_formula_without_virtual_flags():
+    src = """
+    contract Vault is ERC4626 {
+        function previewDeposit(uint256 assets) public view returns (uint256) {
+            return assets * totalSupply() / totalAssets();
+        }
+    }
+    """
+    assert "ERC4626_INFLATION_ATTACK" in _types(src)
+
+
+def test_erc4626_virtual_offset_is_ignored():
+    src = """
+    contract Vault is ERC4626 {
+        uint8 private constant _decimalsOffset = 3;
+        function previewDeposit(uint256 assets) public view returns (uint256) {
+            return assets * (totalSupply() + 10 ** _decimalsOffset) / (totalAssets() + 1);
+        }
+    }
+    """
+    assert "ERC4626_INFLATION_ATTACK" not in _types(src)
+
+
 def test_spot_oracle_get_reserves_plus_liquidate_flags():
     src = """
     contract Lending {
