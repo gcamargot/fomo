@@ -27,6 +27,10 @@ services:
       - BSCSCAN_API_KEY=${BSCSCAN_API_KEY:-}
       - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       - BASE_RPC_URL=${BASE_RPC_URL:-https://mainnet.base.org}
+      - FOMO_API_BIND=0.0.0.0
+      - FOMO_API_PORT=8787
+    ports:
+      - "${FOMO_API_PORT:-8787}:8787"
     volumes:
       - ./contracts:/app/contracts
     logging:
