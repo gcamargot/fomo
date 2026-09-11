@@ -320,6 +320,14 @@ def test_profit_gate_clmm_never_keeps():
     assert any("UNMODELED_CLMM" in n for n in notes)
 
 
+def test_profit_gate_compound_empty_market_uses_asset_eth():
+    confirmed = [{"type": "COMPOUND_EMPTY_MARKET", "_asset_eth": 1.0}]
+    kept, notes, est = apply_profit_gate(confirmed, eth_balance=0.0)
+    assert kept == confirmed
+    assert est is not None and est.method == "vault_inflation"
+    assert notes == []
+
+
 def test_profit_gate_vault_inflation_uses_asset_eth():
     confirmed = [{"type": "ERC4626_INFLATION_ATTACK", "_asset_eth": 1.0}]
     kept, notes, est = apply_profit_gate(
