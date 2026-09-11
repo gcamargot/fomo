@@ -240,6 +240,25 @@ def test_replay_dexible_arbitrary_from():
     assert "UNCONSTRAINED_ARBITRARY_CALL" in types or "DEXIBLE_ARBITRARY_FROM" in types
 
 
+OZ_ERC721_SAFE_TRANSFER = """
+contract ERC721 {
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory _data
+    ) public payable virtual {
+        transferFrom(from, to, tokenId);
+        require(_checkOnERC721Received(from, to, tokenId, _data));
+    }
+}
+"""
+
+
+def test_replay_oz_erc721_safe_transfer_is_not_arbitrary_call():
+    assert "UNCONSTRAINED_ARBITRARY_CALL" not in _types(OZ_ERC721_SAFE_TRANSFER)
+
+
 def test_replay_tax_token_public_swapback():
     assert "PUBLIC_SWAPBACK_TRIGGER" in _types(TAX_TOKEN_SWAPBACK)
 
