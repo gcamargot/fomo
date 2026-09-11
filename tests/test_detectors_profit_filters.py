@@ -96,6 +96,144 @@ def test_interface_collect_is_ignored():
     assert "V3_COLLECT_UNPROTECTED" not in _types(src)
 
 
+def test_v4_hook_after_swap_without_pool_manager_flags():
+    src = """
+    contract GreedyHook {
+        function afterSwap(address sender, PoolKey calldata key,
+            SwapParams calldata params, int256 delta, bytes calldata data)
+            external returns (bytes4, int128) {
+            return (this.afterSwap.selector, 0);
+        }
+    }
+    """
+    assert "V4_HOOK_UNPROTECTED" in _types(src)
+
+
+def test_v4_hook_with_pool_manager_is_ignored():
+    src = """
+    contract HonestHook is BaseHook {
+        function afterSwap(address sender, PoolKey calldata key,
+            SwapParams calldata params, int256 delta, bytes calldata data)
+            external onlyPoolManager returns (bytes4, int128) {
+            return (IHooks.afterSwap.selector, 0);
+        }
+    }
+    """
+    assert "V4_HOOK_UNPROTECTED" not in _types(src)
+
+
+def test_v4_hooks_interface_is_ignored():
+    src = """
+    interface IHooks {
+        function afterSwap(address sender, PoolKey calldata key,
+            SwapParams calldata params, int256 delta, bytes calldata data)
+            external returns (bytes4, int128);
+    }
+    """
+    assert "V4_HOOK_UNPROTECTED" not in _types(src)
+
+
+def test_v4_hook_probe_plan_encodes_after_swap():
+    from token_scanner_daemon import OnChainStateVerifier
+    src = """
+    function afterSwap(address sender, PoolKey calldata key,
+        SwapParams calldata params, int256 delta, bytes calldata data)
+        external returns (bytes4, int128) { }
+    """
+    plan = OnChainStateVerifier.v4_hook_probe_plan(src)
+    assert plan is not None
+    sig, args = plan
+    assert sig.startswith("afterSwap(")
+    assert len(args) > 64
+
+
+def test_v4_hook_gate_confirms_only_success():
+    from token_scanner_daemon import OnChainStateVerifier
+    ok, note = OnChainStateVerifier.v4_hook_gate("success", 0.0)
+    assert ok is True
+    assert note == "V4_HOOK_CALLABLE"
+    ok, note = OnChainStateVerifier.v4_hook_gate("revert", 1.5)
+    assert ok is False
+
+
+def test_profit_gate_v4_hook_uses_native():
+    from profit_estimator import apply_profit_gate
+    kept, notes, est = apply_profit_gate(
+        [{"type": "V4_HOOK_UNPROTECTED"}],
+        eth_balance=0.2,
+    )
+    assert len(kept) == 1
+    assert est is not None and est.actionable is True
+
+
+def test_erc4626_share_formula_without_virtual_flags():
+    src = """
+    contract Vault is ERC4626 {
+        function previewDeposit(uint256 assets) public view returns (uint256) {
+            return assets * totalSupply() / totalAssets();
+        }
+    }
+    """
+    assert "ERC4626_INFLATION_ATTACK" in _types(src)
+
+
+def test_erc4626_virtual_offset_is_ignored():
+    src = """
+    contract Vault is ERC4626 {
+        uint8 private constant _decimalsOffset = 3;
+        function previewDeposit(uint256 assets) public view returns (uint256) {
+            return assets * (totalSupply() + 10 ** _decimalsOffset) / (totalAssets() + 1);
+        }
+    }
+    """
+    assert "ERC4626_INFLATION_ATTACK" not in _types(src)
+
+
+def test_spot_oracle_get_reserves_plus_liquidate_flags():
+    src = """
+    contract Lending {
+        function liquidate(address user) external {
+            (uint112 r0, uint112 r1,) = pair.getReserves();
+            uint256 collateral = r0 * shares[user] / r1;
+            _seize(user, collateral);
+        }
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" in _types(src)
+
+
+def test_spot_oracle_get_amounts_out_plus_borrow_flags():
+    src = """
+    function borrow(uint256 amount) external {
+        uint256[] memory out = router.getAmountsOut(amount, path);
+        uint256 collateral = out[1];
+        _borrow(msg.sender, amount);
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" in _types(src)
+
+
+def test_chainlink_latest_round_is_not_spot_oracle():
+    src = """
+    function liquidate(address user) external {
+        (, int256 px,,,) = feed.latestRoundData();
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        uint256 collateral = uint256(px) * r0 / r1;
+        _seize(user, collateral);
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" not in _types(src)
+
+
+def test_pair_interface_get_reserves_is_not_spot_oracle():
+    src = """
+    interface IUniswapV2Pair {
+        function getReserves() external view returns (uint112, uint112, uint32);
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" not in _types(src)
+
+
 def test_only_owner_collect_is_ignored():
     src = """
     function collect() external onlyOwner {

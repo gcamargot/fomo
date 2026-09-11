@@ -17,6 +17,9 @@ XYK_TYPES = frozenset({
 })
 SKIM_TYPES = frozenset({"PAIR_SKIM"})
 COLLECT_TYPES = frozenset({"V3_COLLECT_UNPROTECTED"})
+SPOT_ORACLE_TYPES = frozenset({"SPOT_ORACLE_MANIPULATION"})
+INFLATION_TYPES = frozenset({"ERC4626_INFLATION_ATTACK"})
+AAVE_V3_FLASH_FEE = 0.0005
 NATIVE_DRAIN_TYPES = frozenset({
     "BROKEN_ACCESS_CONTROL",
     "UNPROTECTED_INITIALIZER_HIJACK",
@@ -24,6 +27,7 @@ NATIVE_DRAIN_TYPES = frozenset({
     "CHECKS_EFFECTS_REENTRANCY",
     "MULTICALL_MSGVALUE_REUSE",
     "FEE_ON_TRANSFER_INVARIANT",
+    "V4_HOOK_UNPROTECTED",
 })
 
 
@@ -219,6 +223,118 @@ def estimate_attacker_sandwich_profit(
     )
 
 
+def _oracle_roundtrip(dump_eth: float, pool_eth: float, pool_token: float):
+    """Dump ETH into a V2 pool and sell the tokens back. Returns (loss, p0, p1) or None."""
+    if dump_eth <= 0 or dump_eth >= pool_eth * 0.9 or pool_token <= 0:
+        return None
+    tokens_out = xyk_amount_out(dump_eth, pool_eth, pool_token)
+    if tokens_out <= 0 or tokens_out >= pool_token:
+        return None
+    r_eth = pool_eth + dump_eth
+    r_tok = pool_token - tokens_out
+    if r_tok <= 0:
+        return None
+    eth_back = xyk_amount_out(tokens_out, r_tok, r_eth)
+    if eth_back <= 0:
+        return None
+    p0 = pool_eth / pool_token
+    p1 = r_eth / r_tok
+    return dump_eth - eth_back, p0, p1
+
+
+def estimate_spot_oracle_profit(
+    *,
+    pool_eth: float,
+    protocol_eth: float,
+    pool_token: float = 1_000_000.0,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+    flash_fee: float = AAVE_V3_FLASH_FEE,
+) -> ProfitEstimate:
+    """Net ETH if a flash loan moves spot on a thin V2 oracle vs a fat vault.
+
+    Extractable is protocol_eth * min(1, |price_after/price_before - 1|).
+    Cost is AMM round-trip + Aave-style flash fee + gas. No RPC.
+    """
+    empty = ProfitEstimate(
+        expected_profit_eth=0.0,
+        pool_eth=float(pool_eth or 0.0),
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="none",
+        actionable=False,
+    )
+    R = float(pool_eth or 0.0)
+    T = float(pool_token or 0.0)
+    P = float(protocol_eth or 0.0)
+    if R <= 0 or T <= 0 or P <= 0:
+        return empty
+    best = 0.0
+    for frac in (0.05, 0.1, 0.25, 0.5, 1.0, 2.0):
+        d = min(frac * R, R * 0.89)
+        trip = _oracle_roundtrip(d, R, T)
+        if trip is None:
+            continue
+        loss, p0, p1 = trip
+        if p0 <= 0:
+            continue
+        move = abs(p1 / p0 - 1.0)
+        extracted = P * min(1.0, move)
+        net = extracted - loss - flash_fee * d - gas_eth
+        if net > best:
+            best = net
+    # Vault must be at least as large as the oracle pool (thin AMM, fat protocol).
+    fat_vault = P >= R
+    return ProfitEstimate(
+        expected_profit_eth=max(0.0, best),
+        pool_eth=R,
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="spot_oracle_xyk",
+        actionable=fat_vault and best >= min_net_profit_eth,
+    )
+
+
+def estimate_vault_inflation_profit(
+    *,
+    total_supply_raw: int,
+    asset_eth: float,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+) -> ProfitEstimate:
+    """First depositor takes an empty vault that already holds a donation.
+
+    Only supply==0 is user-exploitable for us (we can still be first).
+    Seeded vaults already belong to whoever minted the 1-wei share.
+    """
+    empty = ProfitEstimate(
+        expected_profit_eth=0.0,
+        pool_eth=0.0,
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="none",
+        actionable=False,
+    )
+    if int(total_supply_raw or 0) != 0:
+        return empty
+    eth = float(asset_eth or 0.0)
+    if eth <= 0:
+        return empty
+    net = max(0.0, eth - gas_eth)
+    return ProfitEstimate(
+        expected_profit_eth=net,
+        pool_eth=0.0,
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="vault_inflation",
+        actionable=net >= min_net_profit_eth,
+    )
+
+
 def estimate_native_drain_profit(
     eth_balance: float,
     *,
@@ -331,6 +447,33 @@ def apply_profit_gate(
             else:
                 notes.append(
                     f"PROFIT_BELOW_THRESHOLD_COLLECT_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in INFLATION_TYPES:
+            last = estimate_vault_inflation_profit(
+                total_supply_raw=0,
+                asset_eth=float(exp.get("_asset_eth") or erc20_eth_equiv or 0.0),
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_VAULT_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in SPOT_ORACLE_TYPES:
+            last = estimate_spot_oracle_profit(
+                pool_eth=pool_eth,
+                protocol_eth=float(eth_balance or 0.0) + float(erc20_eth_equiv or 0.0),
+                pool_token=pool_token,
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_ORACLE_{last.expected_profit_eth:.4f}ETH"
                 )
         elif vtype in NATIVE_DRAIN_TYPES:
             last = estimate_native_drain_profit(

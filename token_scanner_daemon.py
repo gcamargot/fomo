@@ -162,8 +162,8 @@ AUTOLIQ_FN_RE = re.compile(
 AUTH_HINT = re.compile(
     r"onlyOwner|onlyRole|onlyAdmin|onlyGovernance|onlyKeeper|onlyOperator|"
     r"onlyAuth|requiresAuth|canCall|ensure_owner|onlyPatron|onlyManager|"
-    r"onlyPlatform|onlyFactory|isOwner|governance\(\)|"
-    r"msg\.sender\s*==\s*(?:owner|_owner|platform|governance|manager)",
+    r"onlyPlatform|onlyFactory|onlyPoolManager|isOwner|governance\(\)|"
+    r"msg\.sender\s*==\s*(?:owner|_owner|platform|governance|manager|poolManager)",
     re.I,
 )
 SAFE_HINTS = (
@@ -669,6 +669,11 @@ class OnChainStateVerifier:
         r"function\s+(collect(?:Protocol)?)\s*\(([^)]*)\)\s*(?:public|external)",
         re.IGNORECASE,
     )
+    _V4_HOOK_FN_RE = re.compile(
+        r"function\s+(beforeSwap|afterSwap|beforeDonate|afterDonate|"
+        r"beforeAddLiquidity|afterAddLiquidity)\s*\(([^)]*)\)\s*(?:public|external)",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def _classify_probe_error(exc: BaseException) -> str:
@@ -760,6 +765,65 @@ class OnChainStateVerifier:
                 return None
             return f"{name}({','.join(sig_types)})", args
         return None
+
+    @staticmethod
+    def v4_hook_probe_plan(
+        source_text: str,
+        recipient: str = "0x00000000000000000000000000000000000A11cE",
+    ) -> Optional[Tuple[str, bytes]]:
+        """ABI plan for the first ungated UniV4 hook callback (IHooks)."""
+        try:
+            from eth_abi import encode as abi_encode
+        except ImportError:
+            return None
+        rec = recipient
+        key = (rec, rec, 3000, 60, rec)
+        swap = (True, 10**18, 0)
+        specs = {
+            "afterswap": (
+                "afterSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),int256,bytes)",
+                ["address", "(address,address,uint24,int24,address)", "(bool,int256,uint160)", "int256", "bytes"],
+                [rec, key, swap, 0, b""],
+            ),
+            "beforeswap": (
+                "beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)",
+                ["address", "(address,address,uint24,int24,address)", "(bool,int256,uint160)", "bytes"],
+                [rec, key, swap, b""],
+            ),
+            "afterdonate": (
+                "afterDonate(address,(address,address,uint24,int24,address),uint256,uint256,bytes)",
+                ["address", "(address,address,uint24,int24,address)", "uint256", "uint256", "bytes"],
+                [rec, key, 0, 0, b""],
+            ),
+            "beforedonate": (
+                "beforeDonate(address,(address,address,uint24,int24,address),uint256,uint256,bytes)",
+                ["address", "(address,address,uint24,int24,address)", "uint256", "uint256", "bytes"],
+                [rec, key, 0, 0, b""],
+            ),
+        }
+        for m in OnChainStateVerifier._V4_HOOK_FN_RE.finditer(source_text or ""):
+            prefix = source_text[max(0, m.start() - 80): m.start()]
+            window = source_text[m.start(): m.start() + 500]
+            if "interface " in prefix:
+                continue
+            if re.search(r"poolManager|onlyPoolManager|BaseHook", window, re.I):
+                continue
+            spec = specs.get(m.group(1).lower())
+            if not spec:
+                continue
+            sig, types, vals = spec
+            return sig, abi_encode(types, vals)
+        return None
+
+    @staticmethod
+    def v4_hook_gate(probe: str, eth_balance: float) -> Tuple[bool, str]:
+        if probe == "auth":
+            return False, "V4_HOOK_AUTH_REVERTED"
+        if probe == "success":
+            return True, "V4_HOOK_CALLABLE"
+        if eth_balance < 0.01:
+            return False, "V4_HOOK_UNFUNDED"
+        return False, "V4_HOOK_REVERT_OR_UNKNOWN"
 
     @staticmethod
     def v3_collect_gate(probe: str, eth_balance: float) -> Tuple[bool, str]:
@@ -1076,10 +1140,14 @@ class OnChainStateVerifier:
                     status_notes.append("SIGNATURE_REPLAY_EMPTY_BALANCE")
 
             elif vtype == "ERC4626_INFLATION_ATTACK":
+                from profit_estimator import estimate_vault_inflation_profit, profit_to_dict as _ptd
+                from profit_estimator import xyk_amount_out
+
                 try:
                     raw_ts = w3.eth.call({"to": c_addr, "data": w3.keccak(text="totalSupply()")[:4]})
                     ts_val = int(raw_ts.hex(), 16) if raw_ts else 0
                     assets = 0
+                    asset_addr = ""
                     try:
                         raw_asset = w3.eth.call({"to": c_addr, "data": w3.keccak(text="asset()")[:4]})
                         asset_addr = w3.to_checksum_address("0x" + raw_asset[-20:].hex())
@@ -1090,14 +1158,41 @@ class OnChainStateVerifier:
                         assets = int(raw_ab.hex(), 16) if raw_ab else 0
                     except Exception:
                         assets = -1
-                    if ts_val == 0 and assets == 0:
-                        exp["onchain_evidence"] = "Vault unseeded: totalSupply=0 and asset.balanceOf(vault)=0"
-                        confirmed_exploits.append(exp)
-                        status_notes.append("VAULT_INFLATION_UNSEEDED")
-                    elif ts_val == 0:
-                        status_notes.append("VAULT_SUPPLY_ZERO_BUT_ALREADY_HAS_ASSETS")
-                    else:
+                    if ts_val != 0:
                         status_notes.append("VAULT_ALREADY_SEEDED")
+                    elif assets <= 0:
+                        # Empty unseeded: opportunity only if a victim appears later.
+                        status_notes.append("VAULT_INFLATION_UNSEEDED")
+                    else:
+                        cfg = DEX_CONFIG.get((chain or "").lower()) or {}
+                        weth = str(cfg.get("weth") or "").lower()
+                        asset_eth = 0.0
+                        if asset_addr.lower() == weth:
+                            asset_eth = assets / 1e18
+                        else:
+                            amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
+                                w3, chain, address
+                            )
+                            pe = float(amm_eval.get("eth_reserve") or 0.0)
+                            pt = float(amm_eval.get("token_reserve") or 0.0)
+                            if pe > 0 and pt > 0 and assets > 0:
+                                asset_eth = xyk_amount_out(assets / 1e18, pt, pe)
+                        est = estimate_vault_inflation_profit(
+                            total_supply_raw=ts_val, asset_eth=asset_eth
+                        )
+                        if est.actionable:
+                            exp["_asset_eth"] = asset_eth
+                            exp["profit"] = _ptd(est)
+                            exp["onchain_evidence"] = (
+                                f"Empty vault donation asset_eth={asset_eth:.4f} "
+                                f"totalSupply=0 profit={est.expected_profit_eth:.4f}"
+                            )
+                            confirmed_exploits.append(exp)
+                            status_notes.append("VAULT_INFLATION_DONATION")
+                        else:
+                            status_notes.append(
+                                f"VAULT_INFLATION_DUST_{asset_eth:.4f}ETH"
+                            )
                 except Exception:
                     status_notes.append("VAULT_PROBE_FAILED")
 
@@ -1129,19 +1224,36 @@ class OnChainStateVerifier:
                     status_notes.append("REENTRANCY_EMPTY_BALANCE")
 
             elif vtype == "SPOT_ORACLE_MANIPULATION":
-                # 1 wei / dust must not count as a funded lending target.
-                if not any(h in source_text for h in LENDING_HINTS):
+                from profit_estimator import estimate_spot_oracle_profit
+
+                vault_hints = LENDING_HINTS + ("totalAssets", "previewRedeem", "convertToShares")
+                if not any(h in source_text for h in vault_hints):
                     status_notes.append("SPOT_ORACLE_NOT_LENDING")
-                elif eth_balance < 0.01:
+                    continue
+                amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
+                    w3, chain, address
+                )
+                pool_eth = float(amm_eval.get("eth_reserve") or 0.0)
+                pool_tok = float(amm_eval.get("token_reserve") or 0.0)
+                if pool_eth <= 0 or pool_tok <= 0:
+                    status_notes.append("SPOT_ORACLE_NO_AMM")
+                    continue
+                est = estimate_spot_oracle_profit(
+                    pool_eth=pool_eth,
+                    protocol_eth=eth_balance,
+                    pool_token=pool_tok,
+                )
+                if not est.actionable:
                     status_notes.append(
-                        f"SPOT_ORACLE_DUST_OR_EMPTY_{eth_balance:.6f}ETH"
+                        f"SPOT_ORACLE_POOL_TOO_DEEP_{est.expected_profit_eth:.4f}ETH"
                     )
-                else:
-                    exp["onchain_evidence"] = (
-                        f"Lending-like contract with {eth_balance:.4f} ETH using spot reserves"
-                    )
-                    confirmed_exploits.append(exp)
-                    status_notes.append("SPOT_ORACLE_LENDING_FUNDED")
+                    continue
+                exp["onchain_evidence"] = (
+                    f"spot oracle pool_eth={pool_eth:.4f} protocol_eth={eth_balance:.4f} "
+                    f"profit={est.expected_profit_eth:.4f}"
+                )
+                confirmed_exploits.append(exp)
+                status_notes.append("SPOT_ORACLE_CALLABLE")
 
             elif vtype == "FLASH_STAKING_REWARD_DRAIN":
                 if eth_balance > 0.0:
@@ -1217,6 +1329,23 @@ class OnChainStateVerifier:
                     )
                     confirmed_exploits.append(exp)
                     status_notes.append("MULTICALL_MSGVALUE_FUNDED")
+
+            elif vtype == "V4_HOOK_UNPROTECTED":
+                plan = OnChainStateVerifier.v4_hook_probe_plan(source_text)
+                if plan is None:
+                    probe = "revert"
+                else:
+                    sig, args_data = plan
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, address, sig, args_data=args_data
+                    )
+                confirm, note = OnChainStateVerifier.v4_hook_gate(probe, eth_balance)
+                status_notes.append(note)
+                if confirm:
+                    exp["onchain_evidence"] = (
+                        f"Ungated V4 hook probe={probe}; native={eth_balance:.4f} ETH"
+                    )
+                    confirmed_exploits.append(exp)
 
             elif vtype == "V3_COLLECT_UNPROTECTED":
                 plan = OnChainStateVerifier.collect_probe_plan(source_text)
@@ -1514,7 +1643,11 @@ class StaticVulnerabilityAuditor:
 
         # 6. ERC-4626 Vault Inflation Attack
         if "ERC4626" in source_text or "totalAssets()" in source_text:
-            inflation_match = re.search(r"(?:assets|amount)\s*\*\s*(?:totalSupply|totalShares)\s*\/\s*(?:totalAssets\(\)|_totalAssets)", source_text)
+            inflation_match = re.search(
+                r"(?:assets|amount)\s*\*\s*(?:totalSupply|totalShares)\s*(?:\(\))?\s*/\s*"
+                r"(?:totalAssets\s*(?:\(\))?|_totalAssets)",
+                source_text,
+            )
             if inflation_match and "virtual" not in source_text.lower() and "_decimalsOffset" not in source_text:
                 findings["has_vault_inflation"] = True
                 snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, inflation_match.start())
@@ -1644,6 +1777,7 @@ class StaticVulnerabilityAuditor:
         # Prefer call-sites (`.getReserves(`) — skip bare `function getReserves()` iface decls.
         spot_match = re.search(
             r"(?<!function\s)(?:\.getVirtualPrice|\.get_virtual_price|\.getReserves|\.slot0|"
+            r"\.getAmountsOut|\.getAmountOut|"
             r"(?<![.\w])getVirtualPrice|(?<![.\w])get_virtual_price|(?<![.\w])slot0)\s*\([^)]*\)"
             r"[^;]*;[\s\n]*[^;]*(?:collateral|borrow|liquidat|debt|ltv|healthFactor)\b",
             source_text,
@@ -1814,6 +1948,32 @@ class StaticVulnerabilityAuditor:
                 "payoff": "Cobrar tokensOwed / protocol fees a msg.sender.",
                 "snippet": snippet,
             })
+
+        # 18c. Unprotected Uniswap V4 hook callbacks (must not be callable by EOAs)
+        for hook_m in OnChainStateVerifier._V4_HOOK_FN_RE.finditer(source_text):
+            prefix = source_text[max(0, hook_m.start() - 80): hook_m.start()]
+            window = source_text[hook_m.start(): hook_m.start() + 500]
+            if "interface " in prefix:
+                continue
+            if re.search(r"poolManager|onlyPoolManager|BaseHook", window, re.I):
+                continue
+            if "{" not in window[:250]:
+                continue
+            if not StaticVulnerabilityAuditor._header_lacks_auth(source_text, hook_m):
+                continue
+            findings["has_unprotected_critical_function"] = True
+            snippet = StaticVulnerabilityAuditor._extract_snippet(source_text, hook_m.start())
+            evidence_list.append({
+                "type": "V4_HOOK_UNPROTECTED",
+                "user_exploitable": True,
+                "title": "UniV4 hook callback sin onlyPoolManager",
+                "severity": "HIGH",
+                "exploiter": "Cualquier EOA (afterSwap/beforeSwap/donate)",
+                "victim": "Fees / deltas del PoolManager vía hook",
+                "payoff": "Invocar el hook fuera del pool y extraer take/fee deltas.",
+                "snippet": snippet,
+            })
+            break
 
         # 19. Public swapBack / swapAndLiquify / manualSwap trigger
         pub_swap = re.search(
