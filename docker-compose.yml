@@ -31,6 +31,11 @@ services:
       - FOMO_API_PORT=8787
     ports:
       - "${FOMO_API_PORT:-8787}:8787"
+    # Tailscale MagicDNS on the homelab sinkholes base/optimism.blockscout.com
+    # to 0.0.0.0; public resolvers return the real Cloudflare IPs.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./contracts:/app/contracts
     logging:

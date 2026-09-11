@@ -64,6 +64,9 @@ def test_dashboard_html(monkeypatch):
     assert st == 200
     assert "text/html" in ctype
     assert b"FOMO profit pipeline" in body
+    assert b"Contratos por red" in body
+    assert b"setInterval(load, 30000)" in body
+    assert b"by_chain" in body
 
 
 def test_post_fp_archives_card_and_updates_db(monkeypatch, tmp_path):
