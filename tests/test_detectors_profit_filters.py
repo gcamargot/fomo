@@ -96,6 +96,51 @@ def test_interface_collect_is_ignored():
     assert "V3_COLLECT_UNPROTECTED" not in _types(src)
 
 
+def test_spot_oracle_get_reserves_plus_liquidate_flags():
+    src = """
+    contract Lending {
+        function liquidate(address user) external {
+            (uint112 r0, uint112 r1,) = pair.getReserves();
+            uint256 collateral = r0 * shares[user] / r1;
+            _seize(user, collateral);
+        }
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" in _types(src)
+
+
+def test_spot_oracle_get_amounts_out_plus_borrow_flags():
+    src = """
+    function borrow(uint256 amount) external {
+        uint256[] memory out = router.getAmountsOut(amount, path);
+        uint256 collateral = out[1];
+        _borrow(msg.sender, amount);
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" in _types(src)
+
+
+def test_chainlink_latest_round_is_not_spot_oracle():
+    src = """
+    function liquidate(address user) external {
+        (, int256 px,,,) = feed.latestRoundData();
+        (uint112 r0, uint112 r1,) = pair.getReserves();
+        uint256 collateral = uint256(px) * r0 / r1;
+        _seize(user, collateral);
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" not in _types(src)
+
+
+def test_pair_interface_get_reserves_is_not_spot_oracle():
+    src = """
+    interface IUniswapV2Pair {
+        function getReserves() external view returns (uint112, uint112, uint32);
+    }
+    """
+    assert "SPOT_ORACLE_MANIPULATION" not in _types(src)
+
+
 def test_only_owner_collect_is_ignored():
     src = """
     function collect() external onlyOwner {

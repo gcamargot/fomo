@@ -1129,19 +1129,36 @@ class OnChainStateVerifier:
                     status_notes.append("REENTRANCY_EMPTY_BALANCE")
 
             elif vtype == "SPOT_ORACLE_MANIPULATION":
-                # 1 wei / dust must not count as a funded lending target.
-                if not any(h in source_text for h in LENDING_HINTS):
+                from profit_estimator import estimate_spot_oracle_profit
+
+                vault_hints = LENDING_HINTS + ("totalAssets", "previewRedeem", "convertToShares")
+                if not any(h in source_text for h in vault_hints):
                     status_notes.append("SPOT_ORACLE_NOT_LENDING")
-                elif eth_balance < 0.01:
+                    continue
+                amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
+                    w3, chain, address
+                )
+                pool_eth = float(amm_eval.get("eth_reserve") or 0.0)
+                pool_tok = float(amm_eval.get("token_reserve") or 0.0)
+                if pool_eth <= 0 or pool_tok <= 0:
+                    status_notes.append("SPOT_ORACLE_NO_AMM")
+                    continue
+                est = estimate_spot_oracle_profit(
+                    pool_eth=pool_eth,
+                    protocol_eth=eth_balance,
+                    pool_token=pool_tok,
+                )
+                if not est.actionable:
                     status_notes.append(
-                        f"SPOT_ORACLE_DUST_OR_EMPTY_{eth_balance:.6f}ETH"
+                        f"SPOT_ORACLE_POOL_TOO_DEEP_{est.expected_profit_eth:.4f}ETH"
                     )
-                else:
-                    exp["onchain_evidence"] = (
-                        f"Lending-like contract with {eth_balance:.4f} ETH using spot reserves"
-                    )
-                    confirmed_exploits.append(exp)
-                    status_notes.append("SPOT_ORACLE_LENDING_FUNDED")
+                    continue
+                exp["onchain_evidence"] = (
+                    f"spot oracle pool_eth={pool_eth:.4f} protocol_eth={eth_balance:.4f} "
+                    f"profit={est.expected_profit_eth:.4f}"
+                )
+                confirmed_exploits.append(exp)
+                status_notes.append("SPOT_ORACLE_CALLABLE")
 
             elif vtype == "FLASH_STAKING_REWARD_DRAIN":
                 if eth_balance > 0.0:
@@ -1644,6 +1661,7 @@ class StaticVulnerabilityAuditor:
         # Prefer call-sites (`.getReserves(`) — skip bare `function getReserves()` iface decls.
         spot_match = re.search(
             r"(?<!function\s)(?:\.getVirtualPrice|\.get_virtual_price|\.getReserves|\.slot0|"
+            r"\.getAmountsOut|\.getAmountOut|"
             r"(?<![.\w])getVirtualPrice|(?<![.\w])get_virtual_price|(?<![.\w])slot0)\s*\([^)]*\)"
             r"[^;]*;[\s\n]*[^;]*(?:collateral|borrow|liquidat|debt|ltv|healthFactor)\b",
             source_text,

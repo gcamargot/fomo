@@ -9,6 +9,7 @@ from profit_estimator import (
     estimate_collect_profit,
     estimate_native_drain_profit,
     estimate_skim_profit,
+    estimate_spot_oracle_profit,
     estimate_swapback_sandwich_profit,
     xyk_amount_out,
 )
@@ -217,6 +218,66 @@ def test_profit_gate_enabled_env(monkeypatch):
     assert profit_gate_enabled() is False
     monkeypatch.setenv("FOMO_PROFIT_GATE", "1")
     assert profit_gate_enabled() is True
+
+
+def test_spot_oracle_thin_pool_fat_vault_is_actionable():
+    est = estimate_spot_oracle_profit(
+        pool_eth=0.2,
+        protocol_eth=5.0,
+        pool_token=1_000_000.0,
+    )
+    assert est.method == "spot_oracle_xyk"
+    assert est.actionable is True
+    assert est.expected_profit_eth > 1.0
+
+
+def test_spot_oracle_deep_pool_tiny_vault_fails():
+    est = estimate_spot_oracle_profit(
+        pool_eth=50.0,
+        protocol_eth=0.2,
+        pool_token=1_000_000.0,
+    )
+    assert est.method == "spot_oracle_xyk"
+    assert est.actionable is False
+
+
+def test_spot_oracle_zero_pool_is_none():
+    est = estimate_spot_oracle_profit(pool_eth=0.0, protocol_eth=10.0)
+    assert est.method == "none"
+    assert est.actionable is False
+
+
+def test_spot_oracle_monotonic_in_protocol_over_pool():
+    thin = estimate_spot_oracle_profit(pool_eth=0.5, protocol_eth=4.0, pool_token=1e6)
+    fat_pool = estimate_spot_oracle_profit(pool_eth=4.0, protocol_eth=0.5, pool_token=1e6)
+    assert thin.expected_profit_eth > fat_pool.expected_profit_eth
+
+
+def test_profit_gate_spot_oracle_keeps_thin_fat():
+    confirmed = [{"type": "SPOT_ORACLE_MANIPULATION"}]
+    kept, notes, est = apply_profit_gate(
+        confirmed,
+        eth_balance=5.0,
+        pool_eth=0.2,
+        pool_token=1_000_000.0,
+    )
+    assert kept == confirmed
+    assert est is not None and est.method == "spot_oracle_xyk"
+    assert est.actionable is True
+    assert notes == []
+
+
+def test_profit_gate_spot_oracle_drops_deep_pool():
+    confirmed = [{"type": "SPOT_ORACLE_MANIPULATION"}]
+    kept, notes, est = apply_profit_gate(
+        confirmed,
+        eth_balance=0.2,
+        pool_eth=50.0,
+        pool_token=1_000_000.0,
+    )
+    assert kept == []
+    assert est is not None and est.actionable is False
+    assert any("ORACLE" in n for n in notes)
 
 
 def test_profit_estimate_frozen_dataclass():
