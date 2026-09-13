@@ -115,14 +115,17 @@ def estimate_skim_profit(
     gas_eth: float = DEFAULT_GAS_ETH,
     min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
 ) -> ProfitEstimate:
-    """UniV2 skim: excess balance above reserves, then sell leftover tokens."""
+    """UniV2 skim of excess *WETH* above getReserves.
+
+    Token-side leftovers (FoT / reflection / pending mint) are not converted
+    to ETH. Selling them into the same pool produced PAIR_SKIM FPs on new
+    Base memecoins (~2% token surplus, 0 extra WETH, ~0.058 ETH "profit").
+    ``pair_token`` / ``reserve_token`` stay in the signature for callers.
+    """
     excess_eth = max(0.0, float(pair_eth or 0.0) - float(reserve_eth or 0.0))
-    excess_token = max(0.0, float(pair_token or 0.0) - float(reserve_token or 0.0))
-    token_eth = 0.0
-    if excess_token > 0 and reserve_token > 0 and reserve_eth > 0:
-        token_eth = xyk_amount_out(excess_token, reserve_token, reserve_eth)
-    gross = excess_eth + token_eth
-    net = max(0.0, gross - gas_eth)
+    if float(pair_token or 0.0) < 0.0 or float(reserve_token or 0.0) < 0.0:
+        excess_eth = 0.0
+    net = max(0.0, excess_eth - gas_eth)
     return ProfitEstimate(
         expected_profit_eth=net,
         pool_eth=float(reserve_eth or 0.0),

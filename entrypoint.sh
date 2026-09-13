@@ -11,7 +11,7 @@ export FOMO_FACTORY_LISTENER="${FOMO_FACTORY_LISTENER:-1}"
 export FOMO_LOG_WATCHER="${FOMO_LOG_WATCHER:-1}"
 
 # Ensure contracts directory structure exists
-mkdir -p /app/contracts/triage_queue /var/log/supervisor
+mkdir -p /app/contracts/triage_queue /app/contracts/triage_archive /var/log/supervisor
 
 # If command is "daemon" or empty, start supervisord running all background daemons
 if [ "$#" -eq 0 ] || [ "$1" = "daemon" ]; then
