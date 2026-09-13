@@ -159,6 +159,17 @@ def test_skim_dust_excess_not_actionable():
     assert est.actionable is False
 
 
+def test_skim_token_surplus_without_weth_excess_not_actionable():
+    est = estimate_skim_profit(
+        pair_eth=2.60,
+        pair_token=1_023_666.0,
+        reserve_eth=2.60,
+        reserve_token=1_000_000.0,
+    )
+    assert est.actionable is False
+    assert est.expected_profit_eth == 0.0
+
+
 def test_collect_owed_weth_actionable():
     est = estimate_collect_profit(owed_weth=0.2, owed_token=0.0)
     assert est.method == "v3_collect"

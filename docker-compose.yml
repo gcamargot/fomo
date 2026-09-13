@@ -36,6 +36,9 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
+    # Host bind is the corpus: SQLite + triage_queue + triage_archive.
+    # The image does not contain the DB (.dockerignore contracts/ + VOLUME).
+    # Pulling a new image keeps this mount; do not copy the DB into the image.
     volumes:
       - ./contracts:/app/contracts
     logging:

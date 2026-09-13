@@ -1813,7 +1813,7 @@ class StaticVulnerabilityAuditor:
         arb_call_match = re.search(
             r"function\s+(?!safeTransferFrom\b)(?!transferFrom\b)\w+\s*\([^)]*address\s+(\w+)[^)]*\)\s*(?:external|public)"
             r"(?![^{]{0,240}(?:onlyOwner|onlyRole))[^{]*\{.{0,800}?"
-            r"(?:\.(?:call|delegatecall)\s*\(|transferFrom\s*\(\s*(?:swapData\.)?(?:from|account|user|owner)\b)",
+            r"(?:\.(?:call|delegatecall)\s*\(|\.\s*transferFrom\s*\(\s*(?:swapData\.)?(?:from|account|user|owner)\b)",
             source_text,
             re.DOTALL,
         )
