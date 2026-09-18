@@ -36,11 +36,12 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
-    # Host bind is the corpus: SQLite + triage_queue + triage_archive.
+    # Host bind is the corpus: SQLite + sources + triage.
+    # Homelab: set FOMO_CONTRACTS_DIR=/data/fomo/contracts in .env so the
+    # tree lives on the 600GB /data disk (inodes on / are exhausted by sources).
     # The image does not contain the DB (.dockerignore contracts/ + VOLUME).
-    # Pulling a new image keeps this mount; do not copy the DB into the image.
     volumes:
-      - ./contracts:/app/contracts
+      - ${FOMO_CONTRACTS_DIR:-./contracts}:/app/contracts
     logging:
       driver: "json-file"
       options:
