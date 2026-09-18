@@ -94,7 +94,12 @@ jobs:
         run: docker compose pull
 
       - name: Deploy Services with Docker Compose
-        run: docker compose up -d --remove-orphans
+        run: |
+          # A container created with `docker run --name fomo-security-suite`
+          # is not in the compose project; `compose up` then fails with a
+          # name conflict. Remove any stray namesake first.
+          docker rm -f fomo-security-suite || true
+          docker compose up -d --remove-orphans
 
       - name: Verify Container Health
         run: |
