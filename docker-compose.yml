@@ -36,11 +36,11 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
-    # Host bind is the corpus: SQLite + triage_queue + triage_archive.
+    # Corpus (SQLite + sources + triage) lives on the VM 600GB /data disk.
+    # Override with FOMO_CONTRACTS_DIR=./contracts for local compose.
     # The image does not contain the DB (.dockerignore contracts/ + VOLUME).
-    # Pulling a new image keeps this mount; do not copy the DB into the image.
     volumes:
-      - ./contracts:/app/contracts
+      - ${FOMO_CONTRACTS_DIR:-/data/fomo/contracts}:/app/contracts
     logging:
       driver: "json-file"
       options:

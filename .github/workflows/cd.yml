@@ -57,10 +57,11 @@ jobs:
     needs: build-and-push
     runs-on: self-hosted
     steps:
-      # Do not use actions/checkout here. The compose volume ./contracts is
-      # written as root by the container; checkout then tries to rmRF the
-      # workspace (even with clean: false when .git is missing) and dies on
-      # EACCES — or, after a chown, would delete the live SQLite corpus.
+      # Do not use actions/checkout here. The compose volume
+      # /data/fomo/contracts is written as root by the container; checkout
+      # then tries to rmRF the workspace (even with clean: false when .git
+      # is missing) and dies on EACCES — or, after a chown, would delete
+      # the live SQLite corpus. Keep .env (FOMO_CONTRACTS_DIR override).
       - name: Sync repo without wiping contracts volume
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
