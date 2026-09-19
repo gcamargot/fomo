@@ -29,6 +29,9 @@ services:
       - BASE_RPC_URL=${BASE_RPC_URL:-https://mainnet.base.org}
       - FOMO_API_BIND=0.0.0.0
       - FOMO_API_PORT=8787
+      - FOMO_SOURCE_HOT_GB=${FOMO_SOURCE_HOT_GB:-15}
+      - FOMO_SOURCE_MIN_AGE_HOURS=${FOMO_SOURCE_MIN_AGE_HOURS:-24}
+      - FOMO_ROTATE_INTERVAL=${FOMO_ROTATE_INTERVAL:-3600}
     ports:
       - "${FOMO_API_PORT:-8787}:8787"
     # Tailscale MagicDNS on the homelab sinkholes base/optimism.blockscout.com

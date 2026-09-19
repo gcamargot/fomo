@@ -62,19 +62,9 @@ def explorer_address_url(chain: str, address: str) -> str:
 
 
 def load_saved_source(chain: str, address: str) -> str:
-    src_dir = os.path.join("./contracts", chain.lower(), address.lower(), "src")
-    if not os.path.isdir(src_dir):
-        return ""
-    chunks = []
-    for root, _, files in os.walk(src_dir):
-        for fname in files:
-            if fname.endswith((".sol", ".rs")):
-                try:
-                    with open(os.path.join(root, fname), "r", encoding="utf-8", errors="ignore") as fh:
-                        chunks.append(fh.read())
-                except Exception:
-                    pass
-    return "\n".join(chunks)
+    from contract_archive import read_contract_sources
+
+    return read_contract_sources(chain, address)
 
 EIP1967_IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
 EIP1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103"
