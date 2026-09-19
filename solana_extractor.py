@@ -122,7 +122,9 @@ class SolanaExtractor:
         """
         program_id = program_id.strip()
         target_dir = os.path.join(output_base_dir, "solana", program_id)
-        os.makedirs(target_dir, exist_ok=True)
+        from contract_archive import prepare_contract_dir
+
+        prepare_contract_dir(target_dir)
 
         output_so_path = os.path.join(target_dir, f"{program_id}.so")
         metadata = {

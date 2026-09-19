@@ -9,6 +9,9 @@ export FACTORY_INTERVAL="${FACTORY_INTERVAL:-15}"
 export LOG_WATCH_INTERVAL="${LOG_WATCH_INTERVAL:-8}"
 export FOMO_FACTORY_LISTENER="${FOMO_FACTORY_LISTENER:-1}"
 export FOMO_LOG_WATCHER="${FOMO_LOG_WATCHER:-1}"
+export FOMO_SOURCE_HOT_GB="${FOMO_SOURCE_HOT_GB:-15}"
+export FOMO_SOURCE_MIN_AGE_HOURS="${FOMO_SOURCE_MIN_AGE_HOURS:-24}"
+export FOMO_ROTATE_INTERVAL="${FOMO_ROTATE_INTERVAL:-3600}"
 
 # Ensure contracts directory structure exists
 mkdir -p /app/contracts/triage_queue /app/contracts/triage_archive /var/log/supervisor

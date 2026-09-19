@@ -306,7 +306,9 @@ class EVMExtractor:
         source_data = self.fetch_verified_source(contract_address)
 
         target_dir = os.path.join(output_base_dir, self.chain, contract_address)
-        os.makedirs(target_dir, exist_ok=True)
+        from contract_archive import prepare_contract_dir
+
+        prepare_contract_dir(target_dir)
 
         metadata = {
             "address": contract_address,
