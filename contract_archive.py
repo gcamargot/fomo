@@ -14,9 +14,27 @@ from pathlib import Path
 from typing import Iterable, Iterator, Optional, Set
 
 ARCHIVE_NAME = "sources.tar.gz"
-DEFAULT_CONTRACTS = os.environ.get("FOMO_CONTRACTS_DIR", "./contracts")
 DEFAULT_HOT_GB = float(os.environ.get("FOMO_SOURCE_HOT_GB", "15"))
 DEFAULT_MIN_AGE_HOURS = float(os.environ.get("FOMO_SOURCE_MIN_AGE_HOURS", "24"))
+
+
+def _resolve_contracts_dir() -> str:
+    """In-container corpus is /app/contracts (compose bind).
+
+    ``FOMO_CONTRACTS_DIR`` on the host is the bind *source* (e.g. /data/fomo/contracts)
+    and must not be used inside the image — that path does not exist there.
+    """
+    for cand in (
+        os.environ.get("FOMO_CONTRACTS_INNER"),
+        "./contracts",
+        "/app/contracts",
+    ):
+        if cand and os.path.isdir(cand):
+            return cand
+    return os.environ.get("FOMO_CONTRACTS_INNER") or "./contracts"
+
+
+DEFAULT_CONTRACTS = _resolve_contracts_dir()
 
 SKIP_TOP = {
     "triage_queue",

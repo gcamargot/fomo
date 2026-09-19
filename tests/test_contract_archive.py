@@ -81,6 +81,16 @@ def test_rotate_archives_oldest_until_hot_cap(tmp_path: Path):
         assert "contract" in text
 
 
+def test_resolve_skips_missing_host_bind_path(tmp_path, monkeypatch):
+    import contract_archive as ca
+
+    monkeypatch.setenv("FOMO_CONTRACTS_DIR", "/data/fomo/contracts")
+    monkeypatch.delenv("FOMO_CONTRACTS_INNER", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "contracts").mkdir()
+    assert ca._resolve_contracts_dir() == "./contracts"
+
+
 def test_rotate_skips_triage_queue_addrs(tmp_path: Path):
     now = 2_000_000_000.0
     old = now - 10 * 86400

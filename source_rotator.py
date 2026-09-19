@@ -41,7 +41,7 @@ def main() -> None:
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--interval", type=int, default=int(os.environ.get("FOMO_ROTATE_INTERVAL", "3600")))
-    parser.add_argument("--contracts-dir", default=os.environ.get("FOMO_CONTRACTS_DIR", DEFAULT_CONTRACTS))
+    parser.add_argument("--contracts-dir", default=DEFAULT_CONTRACTS)
     parser.add_argument("--hot-gb", type=float, default=DEFAULT_HOT_GB)
     parser.add_argument("--min-age-hours", type=float, default=DEFAULT_MIN_AGE_HOURS)
     args = parser.parse_args()

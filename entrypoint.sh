@@ -12,6 +12,12 @@ export FOMO_LOG_WATCHER="${FOMO_LOG_WATCHER:-1}"
 export FOMO_SOURCE_HOT_GB="${FOMO_SOURCE_HOT_GB:-15}"
 export FOMO_SOURCE_MIN_AGE_HOURS="${FOMO_SOURCE_MIN_AGE_HOURS:-24}"
 export FOMO_ROTATE_INTERVAL="${FOMO_ROTATE_INTERVAL:-3600}"
+# Host .env FOMO_CONTRACTS_DIR is the compose bind source. Inside the
+# container the volume is always /app/contracts.
+if [ -d /app/contracts ]; then
+    export FOMO_CONTRACTS_INNER="/app/contracts"
+    export FOMO_CONTRACTS_DIR="/app/contracts"
+fi
 
 # Ensure contracts directory structure exists
 mkdir -p /app/contracts/triage_queue /app/contracts/triage_archive /var/log/supervisor
