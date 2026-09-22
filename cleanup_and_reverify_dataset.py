@@ -188,6 +188,8 @@ def _persist_result(db: TokenScannerDB, result: Dict[str, Any]) -> None:
         "has_permit_no_nonce": bool(findings.get("has_permit_no_nonce", False)),
         "has_multicall_msgvalue": bool(findings.get("has_multicall_msgvalue", False)),
         "has_public_swapback": bool(findings.get("has_public_swapback", False)),
+        "has_public_mint": bool(findings.get("has_public_mint", False)),
+        "has_balance_overflow": bool(findings.get("has_balance_overflow", False)),
         "triage_file_path": triage_path,
         "expected_profit_eth": result.get("expected_profit_eth"),
     }

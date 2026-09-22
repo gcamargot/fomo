@@ -19,7 +19,12 @@ from rich.console import Console
 from rich.panel import Panel
 from web3 import Web3
 
-from fork_profit_gate import run_fork_profit_test, should_emit_triage
+from fork_profit_gate import (
+    ForkGateResult,
+    run_fork_overflow_test,
+    run_fork_profit_test,
+    split_fork_gated,
+)
 from opportunity_watchlist import backoff_next_check, fetch_watchlist
 from state_delta import (
     StateSnapshot,
@@ -198,22 +203,34 @@ class DormantBalanceWatcher:
                 pass
         if not (is_active and confirmed):
             return False
-        fork_res = run_fork_profit_test(addr, chain)
-        if not should_emit_triage(is_active=True, confirmed=confirmed, fork_result=fork_res):
+        plain = [e for e in confirmed if not e.get("requires_live_fork")]
+        held = [e for e in confirmed if e.get("requires_live_fork")]
+        plain_fr = (
+            run_fork_profit_test(addr, chain)
+            if plain
+            else ForkGateResult(passed=True, skipped=True, reason="no_plain")
+        )
+        overflow_fr = (
+            run_fork_overflow_test(addr, chain)
+            if held
+            else ForkGateResult(passed=True, skipped=True, reason="no_held")
+        )
+        emit_list, fork_notes = split_fork_gated(confirmed, plain_fr, overflow_fr)
+        if not emit_list:
             try:
                 self.db.update_token_flags(
                     addr,
-                    {"dynamic_status": f"{status} | FORK_GATE_{fork_res.reason.upper()}"},
+                    {"dynamic_status": f"{status} | {' | '.join(fork_notes)}"},
                 )
             except Exception:
                 pass
             return False
         target["eth_balance"] = eth_bal
         target["dynamic_status"] = status
-        profit = profit_payload or ((confirmed[0] or {}).get("profit") if confirmed else None)
+        profit = profit_payload or ((emit_list[0] or {}).get("profit") if emit_list else None)
         if profit:
             target["profit"] = profit
-        triage_path = TriageReportGenerator.generate_triage_file(target, confirmed)
+        triage_path = TriageReportGenerator.generate_triage_file(target, emit_list)
         flags = {
             "is_user_exploitable": 1,
             "onchain_verified": 1,
@@ -224,7 +241,7 @@ class DormantBalanceWatcher:
         if profit and profit.get("expected_profit_eth") is not None:
             flags["expected_profit_eth"] = profit["expected_profit_eth"]
         self.db.update_token_flags(addr, flags)
-        AlertDispatcher.emit_triage_alert(target, confirmed, triage_path)
+        AlertDispatcher.emit_triage_alert(target, emit_list, triage_path)
         return True
 
     def run_cycle(self) -> Tuple[int, int]:

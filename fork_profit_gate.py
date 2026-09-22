@@ -6,7 +6,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 SIMULATIONS_DIR = Path(__file__).resolve().parent / "simulations"
 
@@ -48,6 +48,7 @@ def run_fork_profit_test(
     runner: Optional[Callable[..., Any]] = None,
     timeout: int = 120,
     cwd: Optional[Path] = None,
+    match_test: str = "testProfitPositive",
 ) -> ForkGateResult:
     """Run `forge test --match-test testProfitPositive` against a fork.
 
@@ -69,7 +70,7 @@ def run_fork_profit_test(
         "forge",
         "test",
         "--match-test",
-        "testProfitPositive",
+        match_test,
         "--fork-url",
         rpc,
         "-vv",
@@ -101,6 +102,56 @@ def run_fork_profit_test(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+def run_fork_overflow_test(
+    address: str,
+    chain: str,
+    *,
+    rpc_url: Optional[str] = None,
+    runner: Optional[Callable[..., Any]] = None,
+    timeout: int = 120,
+    cwd: Optional[Path] = None,
+) -> ForkGateResult:
+    """Fork-only probe: ``transfer(max)`` credits the caller. Not a swap-out."""
+    return run_fork_profit_test(
+        address,
+        chain,
+        rpc_url=rpc_url,
+        runner=runner,
+        timeout=timeout,
+        cwd=cwd,
+        match_test="testOverflowCandidate",
+    )
+
+
+def split_fork_gated(
+    confirmed: List[Dict],
+    plain_fork: ForkGateResult,
+    overflow_fork: ForkGateResult,
+) -> Tuple[List[Dict], List[str]]:
+    """Keep plain hits when the generic fork is off. Overflow needs a real run.
+
+    ``requires_live_fork`` items stay out of the queue when the overflow test
+    was skipped (``FOMO_FORK_GATE`` off) or failed.
+    """
+    emit: List[Dict] = []
+    notes: List[str] = []
+    for exp in confirmed:
+        if exp.get("requires_live_fork"):
+            if overflow_fork.passed and not overflow_fork.skipped:
+                emit.append(exp)
+            else:
+                note = f"OVERFLOW_FORK_{(overflow_fork.reason or 'disabled').upper()}"
+                if note not in notes:
+                    notes.append(note)
+        elif plain_fork.passed:
+            emit.append(exp)
+        else:
+            note = f"FORK_GATE_{(plain_fork.reason or 'fail').upper()}"
+            if note not in notes:
+                notes.append(note)
+    return emit, notes
 
 
 def should_emit_triage(

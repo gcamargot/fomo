@@ -21,6 +21,8 @@ DASHBOARD_DRAIN_COLUMNS = (
     "has_unprotected_initializer",
     "has_arbitrary_call",
     "has_reentrancy_flaw",
+    "has_public_mint",
+    "has_balance_overflow",
 )
 
 
