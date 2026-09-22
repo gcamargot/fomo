@@ -16,6 +16,8 @@ XYK_TYPES = frozenset({
     "PUBLIC_SWAPBACK_TRIGGER",
 })
 SKIM_TYPES = frozenset({"PAIR_SKIM"})
+POOL_DRAIN_TYPES = frozenset({"PUBLIC_MINT", "BALANCE_OVERFLOW"})
+BROKEN_K_TYPES = frozenset({"PAIR_K_BROKEN"})
 COLLECT_TYPES = frozenset({"V3_COLLECT_UNPROTECTED"})
 SPOT_ORACLE_TYPES = frozenset({"SPOT_ORACLE_MANIPULATION"})
 INFLATION_TYPES = frozenset({
@@ -134,6 +136,55 @@ def estimate_skim_profit(
         gas_eth=gas_eth,
         method="pair_skim",
         actionable=net >= min_net_profit_eth,
+    )
+
+
+def estimate_unlimited_sell_profit(
+    *,
+    pool_eth: float,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+) -> ProfitEstimate:
+    """Sell an unbounded token balance into a V2 WETH pair.
+
+    Output approaches ``reserve_eth * 997/1000`` as the sell size grows.
+    Used for public mint and pre-0.8 balance underflow that credits the caller.
+    """
+    gross = max(0.0, float(pool_eth or 0.0) * 997.0 / 1000.0)
+    net = max(0.0, gross - gas_eth)
+    deep = float(pool_eth or 0.0) >= MIN_POOL_ETH
+    return ProfitEstimate(
+        expected_profit_eth=net,
+        pool_eth=float(pool_eth or 0.0),
+        treasury_token_raw=0,
+        sell_fraction=1.0,
+        gas_eth=gas_eth,
+        method="unlimited_sell",
+        actionable=deep and net >= min_net_profit_eth,
+    )
+
+
+def estimate_broken_k_profit(
+    *,
+    pool_eth: float,
+    gas_eth: float = DEFAULT_GAS_ETH,
+    min_net_profit_eth: float = MIN_NET_PROFIT_ETH,
+) -> ProfitEstimate:
+    """UniV2 ``swap`` that transfers WETH and does not enforce K.
+
+    The probe asks for ``reserve - 1`` wei, so the gross is the WETH reserve.
+    """
+    gross = max(0.0, float(pool_eth or 0.0))
+    net = max(0.0, gross - gas_eth)
+    deep = gross >= MIN_POOL_ETH
+    return ProfitEstimate(
+        expected_profit_eth=net,
+        pool_eth=gross,
+        treasury_token_raw=0,
+        sell_fraction=0.0,
+        gas_eth=gas_eth,
+        method="broken_k",
+        actionable=deep and net >= min_net_profit_eth,
     )
 
 
@@ -441,6 +492,32 @@ def apply_profit_gate(
             else:
                 notes.append(
                     f"PROFIT_BELOW_THRESHOLD_SKIM_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in POOL_DRAIN_TYPES:
+            pool = exp.get("_pool_eth")
+            pool_for_sell = float(pool_eth if pool is None else pool)
+            last = estimate_unlimited_sell_profit(
+                pool_eth=pool_for_sell,
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_UNLIMITED_SELL_{last.expected_profit_eth:.4f}ETH"
+                )
+        elif vtype in BROKEN_K_TYPES:
+            last = estimate_broken_k_profit(
+                pool_eth=float(pool_eth or 0.0),
+                gas_eth=gas_eth,
+                min_net_profit_eth=min_net_profit_eth,
+            )
+            if last.actionable:
+                kept.append(exp)
+            else:
+                notes.append(
+                    f"PROFIT_BELOW_THRESHOLD_BROKEN_K_{last.expected_profit_eth:.4f}ETH"
                 )
         elif vtype in COLLECT_TYPES:
             last = estimate_collect_profit(

@@ -127,6 +127,8 @@ _AUDIT_FLAG_COLS = (
     "has_arbitrary_call",
     "has_reentrancy_flaw",
     "has_dynamic_taxes",
+    "has_public_mint",
+    "has_balance_overflow",
 )
 
 
@@ -183,6 +185,8 @@ def process_factory_pair(
     fork_run=None,
     pair_balances=None,
     skim_probe=None,
+    k_probe=None,
+    overflow_fork_run=None,
 ) -> bool:
     """Ingest a new WETH pair: persist row, profit estimate, optional full pipeline.
 
@@ -255,11 +259,29 @@ def process_factory_pair(
                 fr = ForkGateResult(passed=False, skipped=False, reason="fork_error")
         if fr is None:
             fr = ForkGateResult(passed=True, skipped=True, reason="disabled")
+        plain_failed = False
         if emit and not should_emit_triage(
             is_active=True, confirmed=confirmed, fork_result=fr
         ):
             emit = False
+            plain_failed = True
             status = f"{status} | FORK_GATE_{fr.reason.upper()}"
+        held = [e for e in (confirmed or []) if e.get("requires_live_fork")]
+        if held:
+            confirmed = [e for e in confirmed if not e.get("requires_live_fork")]
+            ov = None
+            if overflow_fork_run is not None:
+                try:
+                    ov = overflow_fork_run()
+                except Exception:
+                    ov = ForkGateResult(passed=False, skipped=False, reason="fork_error")
+            if ov is not None and ov.passed and not ov.skipped:
+                confirmed = list(held) if plain_failed else list(confirmed) + held
+                emit = True
+            else:
+                reason = ov.reason if ov is not None else "disabled"
+                status = f"{status} | OVERFLOW_FORK_{str(reason).upper()}"
+                emit = (not plain_failed) and bool(confirmed)
     else:
         emit = should_emit_factory_triage(
             verified=verified,
@@ -317,6 +339,41 @@ def process_factory_pair(
         elif not emit:
             status = f"PAIR_SKIM_{probe.upper()}"
 
+    from profit_estimator import estimate_broken_k_profit
+
+    k_est = estimate_broken_k_profit(pool_eth=float(pool_eth or 0.0))
+    if k_est.actionable and reserves_known and k_probe is not None:
+        probe = "revert"
+        try:
+            probe = str(k_probe() or "revert")
+        except Exception:
+            probe = "revert"
+        if probe == "success":
+            k_payload = _profit_to_dict(k_est)
+            k_hit = {
+                "type": "PAIR_K_BROKEN",
+                "user_exploitable": True,
+                "severity": "CRITICAL",
+                "title": "UniV2 swap sin chequeo de K",
+                "exploiter": "Cualquier EOA (pair.swap)",
+                "victim": "Reserva WETH del par",
+                "payoff": "Recibir reserve-1 wei de WETH sin entregar token.",
+                "snippet": "function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external;",
+                "profit": k_payload,
+            }
+            confirmed = list(confirmed or []) + [k_hit]
+            user_exploits = list(user_exploits or []) + [k_hit]
+            emit = True
+            if "PAIR_SKIM_ACTIONABLE" in status:
+                status = f"{status} | PAIR_K_BROKEN"
+            else:
+                status = "PAIR_K_BROKEN"
+            cur = float((profit_payload or {}).get("expected_profit_eth") or 0.0)
+            if float(k_payload.get("expected_profit_eth") or 0.0) >= cur:
+                profit_payload = k_payload
+        else:
+            status = f"{status} | PAIR_K_{probe.upper()}"
+
     pair = str(ev.get("pair") or "").lower() or None
     fields: Dict[str, Any] = {
         "dynamic_status": status,
@@ -330,7 +387,10 @@ def process_factory_pair(
             )
         ),
     }
-    if (src and user_exploits) or (profit_payload and status == "PAIR_SKIM_ACTIONABLE"):
+    if (src and user_exploits) or (
+        profit_payload
+        and ("PAIR_SKIM_ACTIONABLE" in status or "PAIR_K_BROKEN" in status)
+    ):
         fields["expected_profit_eth"] = (
             (profit_payload or {}).get("expected_profit_eth")
             if profit_payload
@@ -362,7 +422,7 @@ def process_factory_pair(
 
 def handle_factory_pair(db, chain: str, ev: Dict[str, str], w3) -> bool:
     """Live daemon hook: source + reserves + profit + optional fork/triage."""
-    from fork_profit_gate import run_fork_profit_test
+    from fork_profit_gate import run_fork_overflow_test, run_fork_profit_test
     from profit_estimator import estimate_swapback_sandwich_profit
     from token_scanner_daemon import (
         OnChainStateVerifier,
@@ -394,6 +454,10 @@ def handle_factory_pair(db, chain: str, ev: Dict[str, str], w3) -> bool:
             args_addr=OnChainStateVerifier.PROBE_EOA,
         ),
         fork_run=lambda: run_fork_profit_test(token, chain),
+        k_probe=lambda: OnChainStateVerifier.probe_pair_swap_k(
+            w3, ev.get("pair") or "", ev.get("weth") or ""
+        ),
+        overflow_fork_run=lambda: run_fork_overflow_test(token, chain),
     )
 
 

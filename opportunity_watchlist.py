@@ -23,6 +23,8 @@ DRAIN_FLAG_COLUMNS = (
     "has_unprotected_router_setter",
     "has_permit_no_nonce",
     "has_multicall_msgvalue",
+    "has_public_mint",
+    "has_balance_overflow",
 )
 
 WATCHLIST_SELECT_COLUMNS = (
